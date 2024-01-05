@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"agones.dev/agones/pkg/util/runtime"
 	e2eframework "agones.dev/agones/test/e2e/framework"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,10 +32,6 @@ import (
 func TestGameServerCreationAfterDeletingOneExtensionsPod(t *testing.T) {
 	logger := e2eframework.TestLogger(t)
 	ctx := context.Background()
-
-	if !runtime.FeatureEnabled(runtime.FeatureSplitControllerAndExtensions) {
-		t.Skip("Skip test. SplitControllerAndExtensions feature is not enabled")
-	}
 
 	assert.NoError(t, waitForAgonesExtensionsRunning(ctx))
 
@@ -67,10 +62,6 @@ func TestGameServerCreationAfterDeletingOneExtensionsPod(t *testing.T) {
 func TestGameServerCreationRightAfterDeletingOneExtensionsPod(t *testing.T) {
 	logger := e2eframework.TestLogger(t)
 	ctx := context.Background()
-
-	if !runtime.FeatureEnabled(runtime.FeatureSplitControllerAndExtensions) {
-		t.Skip("Skip test. SplitControllerAndExtensions feature is not enabled")
-	}
 
 	assert.NoError(t, waitForAgonesExtensionsRunning(ctx))
 
@@ -114,7 +105,7 @@ func deleteAgonesExtensionsPod(ctx context.Context, t *testing.T, waitForExtensi
 }
 
 func waitForAgonesExtensionsRunning(ctx context.Context) error {
-	return wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		list, err := getAgoneseExtensionsPods(ctx)
 		if err != nil {
 			return true, err

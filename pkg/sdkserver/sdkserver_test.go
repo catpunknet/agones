@@ -28,9 +28,12 @@ import (
 	"agones.dev/agones/pkg/sdk/alpha"
 	agtesting "agones.dev/agones/pkg/testing"
 	agruntime "agones.dev/agones/pkg/util/runtime"
+	"github.com/google/go-cmp/cmp"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -795,6 +798,65 @@ func TestSDKServerSendGameServerUpdate(t *testing.T) {
 	assert.Equal(t, fixture.ObjectMeta.Name, sdkGS.ObjectMeta.Name)
 }
 
+func TestSDKServer_SendGameServerUpdateRemovesDisconnectedStream(t *testing.T) {
+	t.Parallel()
+
+	fixture := &agonesv1.GameServer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test",
+			Namespace: "default",
+		},
+		Status: agonesv1.GameServerStatus{
+			State: agonesv1.GameServerStateReady,
+		},
+	}
+
+	m := agtesting.NewMocks()
+	fakeWatch := watch.NewFake()
+	m.AgonesClient.AddWatchReactor("gameservers", k8stesting.DefaultWatchReactor(fakeWatch, nil))
+	sc, err := defaultSidecar(m)
+	require.NoError(t, err)
+	assert.Empty(t, sc.connectedStreams)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	sc.ctx = ctx
+	sc.informerFactory.Start(ctx.Done())
+
+	fakeWatch.Add(fixture.DeepCopy())
+	assert.True(t, cache.WaitForCacheSync(ctx.Done(), sc.gameServerSynced))
+	sc.gsWaitForSync.Done()
+
+	// Wait for the GameServer to be populated, as we can't rely on WaitForCacheSync.
+	require.Eventually(t, func() bool {
+		_, err := sc.gameServer()
+		return err == nil
+	}, time.Minute, time.Second, "Could not find the GameServer")
+
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	t.Cleanup(streamCancel)
+
+	// Trigger stream removal by sending an update on a cancelled stream.
+
+	stream := newGameServerMockStream()
+	stream.ctx = streamCtx
+
+	asyncWatchGameServer(t, sc, stream)
+	assert.Nil(t, waitConnectedStreamCount(sc, 1))
+
+	<-stream.msgs // Initial msg when WatchGameServer() is called.
+
+	streamCancel()
+
+	sc.sendGameServerUpdate(fixture)
+
+	select {
+	case <-stream.msgs:
+		assert.Fail(t, "Event stream should have been removed.")
+	case <-time.After(1 * time.Second):
+	}
+}
+
 func TestSDKServerUpdateEventHandler(t *testing.T) {
 	t.Parallel()
 	fixture := &agonesv1.GameServer{
@@ -1025,6 +1087,719 @@ func TestSDKServerReserveTimeout(t *testing.T) {
 	wg.Wait()
 }
 
+func TestSDKServerUpdateCounter(t *testing.T) {
+	t.Parallel()
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+
+	err := agruntime.ParseFeatures(string(agruntime.FeatureCountsAndLists) + "=true")
+	require.NoError(t, err, "Can not parse FeatureCountsAndLists feature")
+
+	counters := map[string]agonesv1.CounterStatus{
+		"widgets":  {Count: int64(10), Capacity: int64(100)},
+		"foo":      {Count: int64(10), Capacity: int64(100)},
+		"bar":      {Count: int64(10), Capacity: int64(100)},
+		"baz":      {Count: int64(10), Capacity: int64(100)},
+		"bazel":    {Count: int64(10), Capacity: int64(100)},
+		"fish":     {Count: int64(10), Capacity: int64(100)},
+		"onefish":  {Count: int64(10), Capacity: int64(100)},
+		"twofish":  {Count: int64(10), Capacity: int64(100)},
+		"redfish":  {Count: int64(10), Capacity: int64(100)},
+		"bluefish": {Count: int64(10), Capacity: int64(100)},
+		"fivefish": {Count: int64(10), Capacity: int64(100)},
+	}
+
+	fixtures := map[string]struct {
+		counterName string
+		requests    []*alpha.UpdateCounterRequest
+		want        agonesv1.CounterStatus
+		updateErrs  []bool
+		updated     bool
+	}{
+		"increment": {
+			counterName: "widgets",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "widgets",
+					CountDiff: 9,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(19), Capacity: int64(100)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+		"increment illegal": {
+			counterName: "widgets",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "foo",
+					CountDiff: 100,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(10), Capacity: int64(100)},
+			updateErrs: []bool{true},
+			updated:    false,
+		},
+		"decrement": {
+			counterName: "bar",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "bar",
+					CountDiff: -1,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(9), Capacity: int64(100)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+		"decrement illegal": {
+			counterName: "baz",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "baz",
+					CountDiff: -11,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(10), Capacity: int64(100)},
+			updateErrs: []bool{true},
+			updated:    false,
+		},
+		"set capacity": {
+			counterName: "bazel",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:     "bazel",
+					Capacity: wrapperspb.Int64(0),
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(0), Capacity: int64(0)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+		"set capacity illegal": {
+			counterName: "fish",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:     "fish",
+					Capacity: wrapperspb.Int64(-1),
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(10), Capacity: int64(100)},
+			updateErrs: []bool{true},
+			updated:    false,
+		},
+		"set count": {
+			counterName: "onefish",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:  "onefish",
+					Count: wrapperspb.Int64(42),
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(42), Capacity: int64(100)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+		"set count illegal": {
+			counterName: "twofish",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:  "twofish",
+					Count: wrapperspb.Int64(101),
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(10), Capacity: int64(100)},
+			updateErrs: []bool{true},
+			updated:    false,
+		},
+		"increment past set capacity illegal": {
+			counterName: "redfish",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:     "redfish",
+					Capacity: wrapperspb.Int64(0),
+				}},
+				{CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "redfish",
+					CountDiff: 1,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(0), Capacity: int64(0)},
+			updateErrs: []bool{false, true},
+			updated:    true,
+		},
+		"decrement past set capacity illegal": {
+			counterName: "bluefish",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:     "bluefish",
+					Capacity: wrapperspb.Int64(0),
+				}},
+				{CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "bluefish",
+					CountDiff: -1,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(0), Capacity: int64(0)},
+			updateErrs: []bool{false, true},
+			updated:    true,
+		},
+		"setcapacity, setcount, and diffcount": {
+			counterName: "fivefish",
+			requests: []*alpha.UpdateCounterRequest{{
+				CounterUpdateRequest: &alpha.CounterUpdateRequest{
+					Name:      "fivefish",
+					Capacity:  wrapperspb.Int64(25),
+					Count:     wrapperspb.Int64(0),
+					CountDiff: 25,
+				}}},
+			want:       agonesv1.CounterStatus{Count: int64(25), Capacity: int64(25)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+	}
+
+	for test, testCase := range fixtures {
+		t.Run(test, func(t *testing.T) {
+			m := agtesting.NewMocks()
+
+			m.AgonesClient.AddReactor("list", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				gs := agonesv1.GameServer{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test", Namespace: "default", Generation: 1,
+					},
+					Spec: agonesv1.GameServerSpec{
+						SdkServer: agonesv1.SdkServer{
+							LogLevel: "Debug",
+						},
+					},
+					Status: agonesv1.GameServerStatus{
+						Counters: counters,
+					},
+				}
+				gs.ApplyDefaults()
+				return true, &agonesv1.GameServerList{Items: []agonesv1.GameServer{gs}}, nil
+			})
+
+			updated := make(chan map[string]agonesv1.CounterStatus, 10)
+			m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				ua := action.(k8stesting.UpdateAction)
+				gs := ua.GetObject().(*agonesv1.GameServer)
+				gs.ObjectMeta.Generation++
+				updated <- gs.Status.Counters
+				return true, gs, nil
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			sc, err := defaultSidecar(m)
+			require.NoError(t, err)
+			assert.NoError(t, sc.WaitForConnection(ctx))
+			sc.informerFactory.Start(ctx.Done())
+			assert.True(t, cache.WaitForCacheSync(ctx.Done(), sc.gameServerSynced))
+
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+
+			go func() {
+				err = sc.Run(ctx)
+				assert.NoError(t, err)
+				wg.Done()
+			}()
+
+			// check initial value comes through
+			require.Eventually(t, func() bool {
+				counter, err := sc.GetCounter(context.Background(), &alpha.GetCounterRequest{Name: testCase.counterName})
+				return counter.Count == 10 && counter.Capacity == 100 && err == nil
+			}, 10*time.Second, time.Second)
+
+			// Update the Counter
+			for i, req := range testCase.requests {
+				_, err = sc.UpdateCounter(context.Background(), req)
+				if testCase.updateErrs[i] {
+					assert.Error(t, err)
+				} else {
+					assert.NoError(t, err)
+				}
+			}
+
+			got, err := sc.GetCounter(context.Background(), &alpha.GetCounterRequest{Name: testCase.counterName})
+			assert.NoError(t, err)
+			assert.Equal(t, testCase.want.Count, got.Count)
+			assert.Equal(t, testCase.want.Capacity, got.Capacity)
+
+			// on an update, confirm that the update hits the K8s api
+			if testCase.updated {
+				select {
+				case value := <-updated:
+					assert.NotNil(t, value[testCase.counterName])
+					assert.Equal(t,
+						agonesv1.CounterStatus{Count: testCase.want.Count, Capacity: testCase.want.Capacity},
+						value[testCase.counterName])
+				case <-time.After(10 * time.Second):
+					assert.Fail(t, "Counter should have been updated")
+				}
+			}
+
+			cancel()
+			wg.Wait()
+		})
+	}
+}
+
+func TestSDKServerAddListValue(t *testing.T) {
+	t.Parallel()
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+
+	err := agruntime.ParseFeatures(string(agruntime.FeatureCountsAndLists) + "=true")
+	require.NoError(t, err, "Can not parse FeatureCountsAndLists feature")
+
+	lists := map[string]agonesv1.ListStatus{
+		"foo": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(10)},
+		"bar": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(10)},
+		"baz": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(10)},
+	}
+
+	fixtures := map[string]struct {
+		listName   string
+		requests   []*alpha.AddListValueRequest
+		want       agonesv1.ListStatus
+		updateErrs []bool
+		updated    bool
+	}{
+		"Add value": {
+			listName:   "foo",
+			requests:   []*alpha.AddListValueRequest{{Name: "foo", Value: "five"}},
+			want:       agonesv1.ListStatus{Values: []string{"one", "two", "three", "four", "five"}, Capacity: int64(10)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+		"Add multiple values including duplicates": {
+			listName: "bar",
+			requests: []*alpha.AddListValueRequest{
+				{Name: "bar", Value: "five"},
+				{Name: "bar", Value: "one"},
+				{Name: "bar", Value: "five"},
+				{Name: "bar", Value: "zero"},
+			},
+			want:       agonesv1.ListStatus{Values: []string{"one", "two", "three", "four", "five", "zero"}, Capacity: int64(10)},
+			updateErrs: []bool{false, true, true, false},
+			updated:    true,
+		},
+		"Add multiple values past capacity": {
+			listName: "baz",
+			requests: []*alpha.AddListValueRequest{
+				{Name: "baz", Value: "five"},
+				{Name: "baz", Value: "six"},
+				{Name: "baz", Value: "seven"},
+				{Name: "baz", Value: "eight"},
+				{Name: "baz", Value: "nine"},
+				{Name: "baz", Value: "ten"},
+				{Name: "baz", Value: "eleven"},
+			},
+			want: agonesv1.ListStatus{
+				Values:   []string{"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"},
+				Capacity: int64(10),
+			},
+			updateErrs: []bool{false, false, false, false, false, false, true},
+			updated:    true,
+		},
+	}
+
+	// nolint:dupl  // Linter errors on lines are duplicate of TestSDKServerUpdateList, TestSDKServerRemoveListValue
+	for test, testCase := range fixtures {
+		t.Run(test, func(t *testing.T) {
+			m := agtesting.NewMocks()
+
+			m.AgonesClient.AddReactor("list", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				gs := agonesv1.GameServer{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test", Namespace: "default", Generation: 1,
+					},
+					Spec: agonesv1.GameServerSpec{
+						SdkServer: agonesv1.SdkServer{
+							LogLevel: "Debug",
+						},
+					},
+					Status: agonesv1.GameServerStatus{
+						Lists: lists,
+					},
+				}
+				gs.ApplyDefaults()
+				return true, &agonesv1.GameServerList{Items: []agonesv1.GameServer{gs}}, nil
+			})
+
+			updated := make(chan map[string]agonesv1.ListStatus, 10)
+			m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				ua := action.(k8stesting.UpdateAction)
+				gs := ua.GetObject().(*agonesv1.GameServer)
+				gs.ObjectMeta.Generation++
+				updated <- gs.Status.Lists
+				return true, gs, nil
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			sc, err := defaultSidecar(m)
+			require.NoError(t, err)
+			assert.NoError(t, sc.WaitForConnection(ctx))
+			sc.informerFactory.Start(ctx.Done())
+			assert.True(t, cache.WaitForCacheSync(ctx.Done(), sc.gameServerSynced))
+
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+
+			go func() {
+				err = sc.Run(ctx)
+				assert.NoError(t, err)
+				wg.Done()
+			}()
+
+			// check initial value comes through
+			require.Eventually(t, func() bool {
+				list, err := sc.GetList(context.Background(), &alpha.GetListRequest{Name: testCase.listName})
+				return cmp.Equal(list.Values, []string{"one", "two", "three", "four"}) && list.Capacity == 10 && err == nil
+			}, 10*time.Second, time.Second)
+
+			// Update the List
+			for i, req := range testCase.requests {
+				_, err = sc.AddListValue(context.Background(), req)
+				if testCase.updateErrs[i] {
+					assert.Error(t, err)
+				} else {
+					assert.NoError(t, err)
+				}
+			}
+
+			got, err := sc.GetList(context.Background(), &alpha.GetListRequest{Name: testCase.listName})
+			assert.NoError(t, err)
+			assert.Equal(t, testCase.want.Values, got.Values)
+			assert.Equal(t, testCase.want.Capacity, got.Capacity)
+
+			// on an update, confirm that the update hits the K8s api
+			if testCase.updated {
+				select {
+				case value := <-updated:
+					assert.NotNil(t, value[testCase.listName])
+					assert.Equal(t,
+						agonesv1.ListStatus{Values: testCase.want.Values, Capacity: testCase.want.Capacity},
+						value[testCase.listName])
+				case <-time.After(10 * time.Second):
+					assert.Fail(t, "List should have been updated")
+				}
+			}
+
+			cancel()
+			wg.Wait()
+		})
+	}
+}
+
+func TestSDKServerRemoveListValue(t *testing.T) {
+	t.Parallel()
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+
+	err := agruntime.ParseFeatures(string(agruntime.FeatureCountsAndLists) + "=true")
+	require.NoError(t, err, "Can not parse FeatureCountsAndLists feature")
+
+	lists := map[string]agonesv1.ListStatus{
+		"foo": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+		"bar": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+		"baz": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+	}
+
+	fixtures := map[string]struct {
+		listName   string
+		requests   []*alpha.RemoveListValueRequest
+		want       agonesv1.ListStatus
+		updateErrs []bool
+		updated    bool
+	}{
+		"Remove value": {
+			listName:   "foo",
+			requests:   []*alpha.RemoveListValueRequest{{Name: "foo", Value: "two"}},
+			want:       agonesv1.ListStatus{Values: []string{"one", "three", "four"}, Capacity: int64(100)},
+			updateErrs: []bool{false},
+			updated:    true,
+		},
+		"Remove multiple values including duplicates": {
+			listName: "bar",
+			requests: []*alpha.RemoveListValueRequest{
+				{Name: "bar", Value: "two"},
+				{Name: "bar", Value: "three"},
+				{Name: "bar", Value: "two"},
+			},
+			want:       agonesv1.ListStatus{Values: []string{"one", "four"}, Capacity: int64(100)},
+			updateErrs: []bool{false, false, true},
+			updated:    true,
+		},
+		"Remove all values": {
+			listName: "baz",
+			requests: []*alpha.RemoveListValueRequest{
+				{Name: "baz", Value: "three"},
+				{Name: "baz", Value: "two"},
+				{Name: "baz", Value: "four"},
+				{Name: "baz", Value: "one"},
+			},
+			want:       agonesv1.ListStatus{Values: []string{}, Capacity: int64(100)},
+			updateErrs: []bool{false, false, false, false},
+			updated:    true,
+		},
+	}
+
+	// nolint:dupl  // Linter errors on lines are duplicate of TestSDKServerUpdateList, TestSDKServerAddListValue
+	for test, testCase := range fixtures {
+		t.Run(test, func(t *testing.T) {
+			m := agtesting.NewMocks()
+
+			m.AgonesClient.AddReactor("list", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				gs := agonesv1.GameServer{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test", Namespace: "default", Generation: 1,
+					},
+					Spec: agonesv1.GameServerSpec{
+						SdkServer: agonesv1.SdkServer{
+							LogLevel: "Debug",
+						},
+					},
+					Status: agonesv1.GameServerStatus{
+						Lists: lists,
+					},
+				}
+				gs.ApplyDefaults()
+				return true, &agonesv1.GameServerList{Items: []agonesv1.GameServer{gs}}, nil
+			})
+
+			updated := make(chan map[string]agonesv1.ListStatus, 10)
+			m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				ua := action.(k8stesting.UpdateAction)
+				gs := ua.GetObject().(*agonesv1.GameServer)
+				gs.ObjectMeta.Generation++
+				updated <- gs.Status.Lists
+				return true, gs, nil
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			sc, err := defaultSidecar(m)
+			require.NoError(t, err)
+			assert.NoError(t, sc.WaitForConnection(ctx))
+			sc.informerFactory.Start(ctx.Done())
+			assert.True(t, cache.WaitForCacheSync(ctx.Done(), sc.gameServerSynced))
+
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+
+			go func() {
+				err = sc.Run(ctx)
+				assert.NoError(t, err)
+				wg.Done()
+			}()
+
+			// check initial value comes through
+			require.Eventually(t, func() bool {
+				list, err := sc.GetList(context.Background(), &alpha.GetListRequest{Name: testCase.listName})
+				return cmp.Equal(list.Values, []string{"one", "two", "three", "four"}) && list.Capacity == 100 && err == nil
+			}, 10*time.Second, time.Second)
+
+			// Update the List
+			for i, req := range testCase.requests {
+				_, err = sc.RemoveListValue(context.Background(), req)
+				if testCase.updateErrs[i] {
+					assert.Error(t, err)
+				} else {
+					assert.NoError(t, err)
+				}
+			}
+
+			got, err := sc.GetList(context.Background(), &alpha.GetListRequest{Name: testCase.listName})
+			assert.NoError(t, err)
+			assert.Equal(t, testCase.want.Values, got.Values)
+			assert.Equal(t, testCase.want.Capacity, got.Capacity)
+
+			// on an update, confirm that the update hits the K8s api
+			if testCase.updated {
+				select {
+				case value := <-updated:
+					assert.NotNil(t, value[testCase.listName])
+					assert.Equal(t,
+						agonesv1.ListStatus{Values: testCase.want.Values, Capacity: testCase.want.Capacity},
+						value[testCase.listName])
+				case <-time.After(10 * time.Second):
+					assert.Fail(t, "List should have been updated")
+				}
+			}
+
+			cancel()
+			wg.Wait()
+		})
+	}
+}
+
+func TestSDKServerUpdateList(t *testing.T) {
+	t.Parallel()
+	agruntime.FeatureTestMutex.Lock()
+	defer agruntime.FeatureTestMutex.Unlock()
+
+	err := agruntime.ParseFeatures(string(agruntime.FeatureCountsAndLists) + "=true")
+	require.NoError(t, err, "Can not parse FeatureCountsAndLists feature")
+
+	lists := map[string]agonesv1.ListStatus{
+		"foo": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+		"bar": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+		"baz": {Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+	}
+
+	fixtures := map[string]struct {
+		listName  string
+		request   *alpha.UpdateListRequest
+		want      agonesv1.ListStatus
+		updateErr bool
+		updated   bool
+	}{
+		"set capacity to max": {
+			listName: "foo",
+			request: &alpha.UpdateListRequest{
+				List: &alpha.List{
+					Name:     "foo",
+					Capacity: int64(1000),
+				},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"capacity"}},
+			},
+			want:      agonesv1.ListStatus{Values: []string{"one", "two", "three", "four"}, Capacity: int64(1000)},
+			updateErr: false,
+			updated:   true,
+		},
+		"set capacity to min values are truncated": {
+			listName: "bar",
+			request: &alpha.UpdateListRequest{
+				List: &alpha.List{
+					Name:     "bar",
+					Capacity: int64(0),
+				},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"capacity"}},
+			},
+			want:      agonesv1.ListStatus{Values: []string{}, Capacity: int64(0)},
+			updateErr: false,
+			updated:   true,
+		},
+		"set capacity past max": {
+			listName: "baz",
+			request: &alpha.UpdateListRequest{
+				List: &alpha.List{
+					Name:     "baz",
+					Capacity: int64(1001),
+				},
+				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"capacity"}},
+			},
+			want:      agonesv1.ListStatus{Values: []string{"one", "two", "three", "four"}, Capacity: int64(100)},
+			updateErr: true,
+			updated:   false,
+		},
+	}
+
+	// nolint:dupl  // Linter errors on lines are duplicate of TestSDKServerAddListValue, TestSDKServerRemoveListValue
+	for test, testCase := range fixtures {
+		t.Run(test, func(t *testing.T) {
+			m := agtesting.NewMocks()
+
+			m.AgonesClient.AddReactor("list", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				gs := agonesv1.GameServer{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test", Namespace: "default", Generation: 1,
+					},
+					Spec: agonesv1.GameServerSpec{
+						SdkServer: agonesv1.SdkServer{
+							LogLevel: "Debug",
+						},
+					},
+					Status: agonesv1.GameServerStatus{
+						Lists: lists,
+					},
+				}
+				gs.ApplyDefaults()
+				return true, &agonesv1.GameServerList{Items: []agonesv1.GameServer{gs}}, nil
+			})
+
+			updated := make(chan map[string]agonesv1.ListStatus, 10)
+			m.AgonesClient.AddReactor("update", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				ua := action.(k8stesting.UpdateAction)
+				gs := ua.GetObject().(*agonesv1.GameServer)
+				gs.ObjectMeta.Generation++
+				updated <- gs.Status.Lists
+				return true, gs, nil
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			sc, err := defaultSidecar(m)
+			require.NoError(t, err)
+			assert.NoError(t, sc.WaitForConnection(ctx))
+			sc.informerFactory.Start(ctx.Done())
+			assert.True(t, cache.WaitForCacheSync(ctx.Done(), sc.gameServerSynced))
+
+			wg := sync.WaitGroup{}
+			wg.Add(1)
+
+			go func() {
+				err = sc.Run(ctx)
+				assert.NoError(t, err)
+				wg.Done()
+			}()
+
+			// check initial value comes through
+			require.Eventually(t, func() bool {
+				list, err := sc.GetList(context.Background(), &alpha.GetListRequest{Name: testCase.listName})
+				return cmp.Equal(list.Values, []string{"one", "two", "three", "four"}) && list.Capacity == 100 && err == nil
+			}, 10*time.Second, time.Second)
+
+			// Update the List
+			_, err = sc.UpdateList(context.Background(), testCase.request)
+			if testCase.updateErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			got, err := sc.GetList(context.Background(), &alpha.GetListRequest{Name: testCase.listName})
+			assert.NoError(t, err)
+			assert.Equal(t, testCase.want.Values, got.Values)
+			assert.Equal(t, testCase.want.Capacity, got.Capacity)
+
+			// on an update, confirm that the update hits the K8s api
+			if testCase.updated {
+				select {
+				case value := <-updated:
+					assert.NotNil(t, value[testCase.listName])
+					assert.Equal(t,
+						agonesv1.ListStatus{Values: testCase.want.Values, Capacity: testCase.want.Capacity},
+						value[testCase.listName])
+				case <-time.After(10 * time.Second):
+					assert.Fail(t, "List should have been updated")
+				}
+			}
+
+			cancel()
+			wg.Wait()
+		})
+	}
+}
+
+func TestDeleteValues(t *testing.T) {
+	t.Parallel()
+
+	list := []string{"pDtUOSwMys", "MIaQYdeONT", "ZTwRNgZfxk", "ybtlfzfJau", "JwoYseCCyU", "JQJXhknLeG",
+		"KDmxroeFvi", "fguLESWvmr", "xRUFzgrtuE", "UwElufBLtA", "jAySktznPe", "JZZRLkAtpQ", "BzHLffHxLd",
+		"KWOyTiXsGP", "CtHFOMotCK", "SBOFIJBoBu", "gjYoIQLbAk", "krWVhxssxR", "ZTqRMKAqSx", "oDalBXZckY",
+		"ZxATCXhBHk", "MTwgrrHePq", "KNGxlixHYt", "taZswVczZU", "beoXmuxAHE", "VbiLLJrRVs", "GrIEuiUlkB",
+		"IPJhGxiKWY", "gYXZtGeFyd", "GYvKpRRsfj", "jRldDqcuEd", "ffPeeHOtMW", "AoEMlXWXVI", "HIjLrcvIqx",
+		"GztXdbnxqg", "zSyNSIyQbp", "lntxdkIjVt", "jOgkkkaytV", "uHMvVtWKoc", "hetOAzBePn", "KqqkCbGLjS",
+		"OQHRRtqIlq", "KFyHqLSACF", "nMZTcGlgAz", "iriNEjRLmh", "PRdGOtnyIo", "JDNDFYCIGi", "acalItODHz",
+		"HJjxJnZWEu", "dmFWypNcDY", "fokGntWpON", "tQLmmXfDNW", "ZvyARYuebj", "ipHGcRmfWt", "MpTXveRDRg",
+		"xPMoVLWeyj", "tXWeapJxkh", "KCMSWWiPMq", "fwsVKiWLuv", "AkKUUqwaOB", "DDlrgoWHGq", "DHScNuprJo",
+		"PRMEGliSBU", "kqwktsjCNb", "vDuQZIhUHp", "YoazMkShki", "IwmXsZvlcp", "CJdrVMsjiD", "xNLnNvLRMN",
+		"nKxDYSOkKx", "MWnrxVVOgK", "YnTHFAunKs", "DzUpkUxpuV", "kNVqCzjRxS", "IzqYWHDloX", "LvlVEniBqp",
+		"CmdFcgTgzM", "qmORqLRaKv", "MxMnLiGOsY", "vAiAorAIdu", "pfhhTRFcpp", "ByqwQcKJYQ", "mKaeTCghbC",
+		"eJssFVxVSI", "PGFMEopXax", "pYKCWZzGMf", "wIeRbiOdkf", "EKlxOXvqdF", "qOOorODUsn", "rcVUwlHOME",
+		"etoDkduCkv", "iqUxYYUfpz", "ALyMkpYnbY", "TwfhVKGaIE", "zWsXruOeOn", "gNEmlDWmnj", "gEvodaSjIJ",
+		"kOjWgLKjKE", "ATxBnODCKg", "liMbkiUTAs"}
+
+	toDeleteMap := map[string]bool{"pDtUOSwMys": true, "beoXmuxAHE": true, "IPJhGxiKWY": true,
+		"gYXZtGeFyd": true, "PRMEGliSBU": true, "kqwktsjCNb": true, "mKaeTCghbC": true,
+		"PGFMEopXax": true, "qOOorODUsn": true, "rcVUwlHOME": true}
+
+	newList := deleteValues(list, toDeleteMap)
+	assert.Equal(t, len(list)-len(toDeleteMap), len(newList))
+}
+
 func TestSDKServerPlayerCapacity(t *testing.T) {
 	t.Parallel()
 	agruntime.FeatureTestMutex.Lock()
@@ -1078,7 +1853,7 @@ func TestSDKServerPlayerCapacity(t *testing.T) {
 	// check initial value comes through
 
 	// async, so check after a period
-	err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), time.Second, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		count, err := sc.GetPlayerCapacity(context.Background(), &alpha.Empty{})
 		return count.Count == 10, err
 	})
@@ -1144,7 +1919,7 @@ func TestSDKServerPlayerConnectAndDisconnectWithoutPlayerTracking(t *testing.T) 
 	// check initial value comes through
 	// async, so check after a period
 	e := &alpha.Empty{}
-	err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), time.Second, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		count, err := sc.GetPlayerCapacity(context.Background(), e)
 
 		assert.Nil(t, count)
@@ -1229,7 +2004,7 @@ func TestSDKServerPlayerConnectAndDisconnect(t *testing.T) {
 	// check initial value comes through
 	// async, so check after a period
 	e := &alpha.Empty{}
-	err = wait.Poll(time.Second, 10*time.Second, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), time.Second, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		count, err := sc.GetPlayerCapacity(context.Background(), e)
 		return count.Count == capacity, err
 	})
@@ -1362,9 +2137,6 @@ func TestSDKServerGracefulTerminationInterrupt(t *testing.T) {
 	agruntime.FeatureTestMutex.Lock()
 	defer agruntime.FeatureTestMutex.Unlock()
 
-	err := agruntime.ParseFeatures(string(agruntime.FeatureSDKGracefulTermination) + "=true")
-	require.NoError(t, err, "Can not parse FeatureSDKGracefulTermination feature")
-
 	m := agtesting.NewMocks()
 	fakeWatch := watch.NewFake()
 	m.AgonesClient.AddWatchReactor("gameservers", k8stesting.DefaultWatchReactor(fakeWatch, nil))
@@ -1429,9 +2201,6 @@ func TestSDKServerGracefulTerminationShutdown(t *testing.T) {
 	t.Parallel()
 	agruntime.FeatureTestMutex.Lock()
 	defer agruntime.FeatureTestMutex.Unlock()
-
-	err := agruntime.ParseFeatures(string(agruntime.FeatureSDKGracefulTermination) + "=true")
-	require.NoError(t, err, "Can not parse FeatureSDKGracefulTermination feature")
 
 	m := agtesting.NewMocks()
 	fakeWatch := watch.NewFake()
@@ -1498,9 +2267,6 @@ func TestSDKServerGracefulTerminationGameServerStateChannel(t *testing.T) {
 	agruntime.FeatureTestMutex.Lock()
 	defer agruntime.FeatureTestMutex.Unlock()
 
-	err := agruntime.ParseFeatures(string(agruntime.FeatureSDKGracefulTermination) + "=true")
-	require.NoError(t, err, "Can not parse FeatureSDKGracefulTermination feature")
-
 	m := agtesting.NewMocks()
 	fakeWatch := watch.NewFake()
 	m.AgonesClient.AddWatchReactor("gameservers", k8stesting.DefaultWatchReactor(fakeWatch, nil))
@@ -1547,15 +2313,15 @@ func defaultSidecar(m agtesting.Mocks) (*SDKServer, error) {
 }
 
 func waitForMessage(sc *SDKServer) error {
-	return wait.PollImmediate(time.Second, 5*time.Second, func() (done bool, err error) {
+	return wait.PollUntilContextTimeout(context.Background(), time.Second, 5*time.Second, true, func(ctx context.Context) (done bool, err error) {
 		sc.healthMutex.RLock()
 		defer sc.healthMutex.RUnlock()
 		return sc.clock.Now().UTC() == sc.healthLastUpdated, nil
 	})
 }
 
-func waitConnectedStreamCount(sc *SDKServer, count int) error {
-	return wait.PollImmediate(1*time.Second, 10*time.Second, func() (bool, error) {
+func waitConnectedStreamCount(sc *SDKServer, count int) error { //nolint:unparam // Keep flexibility.
+	return wait.PollUntilContextTimeout(context.Background(), 1*time.Second, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		sc.streamMutex.RLock()
 		defer sc.streamMutex.RUnlock()
 		return len(sc.connectedStreams) == count, nil

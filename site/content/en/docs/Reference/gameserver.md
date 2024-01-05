@@ -9,6 +9,7 @@ description: >
 
 A full GameServer specification is available below and in the {{< ghlink href="examples/gameserver.yaml" >}}example folder{{< /ghlink >}} for reference :
 
+
 ```yaml
 apiVersion: "agones.dev/v1"
 kind: GameServer
@@ -76,6 +77,27 @@ spec:
   # players:
   #   # set this GameServer's initial player capacity
   #   initialCapacity: 10
+  #
+  # [Stage:Alpha]
+  # [FeatureFlag:CountsAndLists]
+  # Counts and Lists provides the configuration for generic (player, room, session, etc.) tracking features.
+  # Commented out since Alpha, and disabled by default
+  # counters: # counters are int64 counters that can be incremented and decremented by set amounts. Keys must be declared at GameServer creation time.
+  #   games: # arbitrary key.
+  #     count: 1 # initial value.
+  #     capacity: 100 # (Optional) Maximum value for the counter. 0 is max(int64).
+  #   sessions:
+  #     count: 1
+  # lists: # lists are lists of values stored against this GameServer that can be added and deleted from. Keys must be declared at GameServer creation time.
+  #   players: # an empty list, with a capacity set to 10.
+  #     capacity: 10 # capacity value, defaults to 1000.
+  #   rooms:
+  #     capacity: 333
+  #     values: # initial set of values in a list.
+  #       - room1
+  #       - room2
+  #       - room3
+  #  
   # Pod template configuration
   # {{< k8s-api-version href="#podtemplate-v1-core" >}}
   template:
@@ -96,7 +118,6 @@ spec:
       # nodeSelector:
       #   kubernetes.io/os: windows
 ```
-
 Since Agones defines a new [Custom Resources Definition (CRD)](https://kubernetes.io/docs/concepts/api-extension/custom-resources/) we can define a new resource using the kind `GameServer` with the custom group `agones.dev` and API version `v1`.
 
 You can use the metadata field to target a specific [namespaces](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/)
@@ -125,6 +146,8 @@ The `spec` field is the actual GameServer specification and it is composed as fo
   - `grpcPort` the port that the SDK Server binds to for gRPC connections
   - `httpPort` the port that the SDK Server binds to for HTTP gRPC gateway connections
 - `players` (Alpha, behind "PlayerTracking" feature gate), sets this GameServer's initial player capacity
+- `counters` (Alpha, requires "CountsAndLists" feature flag) are int64 counters that can be incremented and decremented by set amounts. Keys must be declared at GameServer creation time.
+- `lists` (Alpha, requires "CountsAndLists" feature flag) are lists of values stored against this GameServer that can be added and deleted from. Key must be declared at GameServer creation time.
 - `template` the [pod spec template]({{% k8s-api-version href="#podtemplatespec-v1-core" %}}) to run your GameServer containers, [see](https://kubernetes.io/docs/concepts/workloads/pods/pod-overview/#pod-templates) for more information.
 
 {{< alert title="Note" color="info">}}
@@ -133,7 +156,6 @@ The GameServer resource does not support updates. If you need to make regular up
 
 ## Stable Network ID
 
-{{< beta title="Stable Network ID" gate="PodHostname" >}}
 
 If you want to connect to a `GameServer` from within your Kubernetes cluster via a convention based
 DNS entry, each Pod attached to a `GameServer` automatically derives its hostname from the name of the `GameServer`.
@@ -163,3 +185,25 @@ Game Servers are created through Kubernetes API (either directly or through a [F
 - SDK, which manages health checking and shutdown of a game server session
 
 ![GameServer State Diagram](../../../diagrams/gameserver-states.dot.png)
+
+## Primary Address vs Addresses
+
+[`GameServer.Status`][gss] has two fields which reflect the network address of the `GameServer`: `address` and `addresses`.
+The `address` field is a policy-based choice of "primary address" that will work for many use cases,
+and will always be one of the `addresses`. The `addresses` field contains every address in the [`Node.Status.addresses`][addresses],
+representing all known ways to reach the `GameServer` over the network.
+
+To choose `address` from `addresses`, [Agones looks for the following address types][addressFunc], in highest to lowest priorty:
+* `ExternalDNS`
+* `ExternalIP`
+* `InternalDNS`
+* `InternalIP`
+
+e.g. if any `ExternalDNS` address is found in the respective `Node`, it is used as the `address`.
+
+The policy for `address` will work for many use-cases, but for some advanced cases, such as IPv6 enablement, you may need
+to evaluate all `addresses` and pick the addresses that best suits your needs.
+
+[addresses]: https://v1-26.docs.kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#nodeaddress-v1-core
+[addressFunc]: https://github.com/googleforgames/agones/blob/a59c5394c7f5bac66e530d21446302581c10c225/pkg/gameservers/gameservers.go#L37-L71
+[gss]: {{% ref "/docs/Reference/agones_crd_api_reference.html#agones.dev/v1.GameServerStatus"  %}}

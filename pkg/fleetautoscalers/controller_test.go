@@ -24,10 +24,11 @@ import (
 	"testing"
 	"time"
 
+	"agones.dev/agones/pkg/apis"
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	autoscalingv1 "agones.dev/agones/pkg/apis/autoscaling/v1"
+	"agones.dev/agones/pkg/gameservers"
 	agtesting "agones.dev/agones/pkg/testing"
-	utilruntime "agones.dev/agones/pkg/util/runtime"
 	"agones.dev/agones/pkg/util/webhooks"
 	"github.com/heptiolabs/healthcheck"
 	"github.com/mattbaird/jsonpatch"
@@ -169,17 +170,15 @@ func TestControllerCreationMutationHandler(t *testing.T) {
 				err = json.Unmarshal(result.Response.Patch, patch)
 				require.NoError(t, err)
 
-				if utilruntime.FeatureEnabled(utilruntime.FeatureCustomFasSyncInterval) {
-					found := false
+				found := false
 
-					for _, expected := range tc.expected.patches {
-						for _, p := range *patch {
-							if assert.ObjectsAreEqual(p, expected) {
-								found = true
-							}
+				for _, expected := range tc.expected.patches {
+					for _, p := range *patch {
+						if assert.ObjectsAreEqual(p, expected) {
+							found = true
 						}
-						assert.True(t, found, "Could not find operation %#v in patch %v", expected, *patch)
 					}
+					assert.True(t, found, "Could not find operation %#v in patch %v", expected, *patch)
 				}
 			}
 		})
@@ -281,10 +280,6 @@ func TestWebhookControllerCreationValidationHandler(t *testing.T) {
 
 // nolint:dupl
 func TestControllerSyncFleetAutoscaler(t *testing.T) {
-	utilruntime.FeatureTestMutex.Lock()
-	defer utilruntime.FeatureTestMutex.Unlock()
-
-	assert.NoError(t, utilruntime.ParseFeatures(string(utilruntime.FeatureCustomFasSyncInterval)+"=false"))
 
 	t.Run("no scaling up because fleet is marked for deletion, buffer policy", func(t *testing.T) {
 		t.Parallel()
@@ -693,7 +688,7 @@ func TestControllerSyncFleetAutoscaler(t *testing.T) {
 
 		err := c.syncFleetAutoscaler(ctx, "default/fas-1")
 		if assert.NotNil(t, err) {
-			assert.Equal(t, "error calculating autoscaling fleet: fleet-1: wrong policy type, should be one of: Buffer, Webhook", err.Error())
+			assert.Equal(t, "error calculating autoscaling fleet: fleet-1: wrong policy type, should be one of: Buffer, Webhook, Counter, List", err.Error())
 		}
 	})
 
@@ -762,18 +757,14 @@ func TestControllerSyncFleetAutoscaler(t *testing.T) {
 	t.Run("Missing fleet autoscaler, doesn't fail/panic", func(t *testing.T) {
 		t.Parallel()
 
-		utilruntime.FeatureTestMutex.Lock()
-		defer utilruntime.FeatureTestMutex.Unlock()
-		require.NoError(t, utilruntime.ParseFeatures(fmt.Sprintf("%s=true", utilruntime.FeatureCustomFasSyncInterval)))
-
 		c, m := newFakeController()
-		ctx, cancel := agtesting.StartInformers(m, c.fleetSynced, c.fleetAutoscalerSynced)
-		defer cancel()
-
 		m.AgonesClient.AddReactor("get", "fleetautoscalers", func(action k8stesting.Action) (bool, runtime.Object, error) {
 			ga := action.(k8stesting.GetAction)
 			return true, nil, k8serrors.NewNotFound(corev1.Resource("gameserver"), ga.GetName())
 		})
+
+		ctx, cancel := agtesting.StartInformers(m, c.fleetSynced, c.fleetAutoscalerSynced)
+		defer cancel()
 
 		require.NoError(t, c.syncFleetAutoscaler(ctx, "default/fas-1"))
 	})
@@ -1013,11 +1004,6 @@ func TestControllerUpdateStatusUnableToScale(t *testing.T) {
 func TestControllerEvents(t *testing.T) {
 	t.Parallel()
 
-	utilruntime.FeatureTestMutex.Lock()
-	defer utilruntime.FeatureTestMutex.Unlock()
-
-	require.NoError(t, utilruntime.ParseFeatures(fmt.Sprintf("%s=true", utilruntime.FeatureCustomFasSyncInterval)))
-
 	c, mocks := newFakeController()
 	fakeWatch := watch.NewFake()
 	mocks.AgonesClient.AddWatchReactor("fleetautoscalers", k8stesting.DefaultWatchReactor(fakeWatch, nil))
@@ -1059,11 +1045,6 @@ func TestControllerEvents(t *testing.T) {
 
 func TestControllerAddUpdateDeleteFasThread(t *testing.T) {
 	t.Parallel()
-
-	utilruntime.FeatureTestMutex.Lock()
-	defer utilruntime.FeatureTestMutex.Unlock()
-
-	assert.NoError(t, utilruntime.ParseFeatures(fmt.Sprintf("%s=true", utilruntime.FeatureCustomFasSyncInterval)))
 
 	var counter int64
 	c, m := newFakeController()
@@ -1188,8 +1169,9 @@ func defaultFixtures() (*autoscalingv1.FleetAutoscaler, *agonesv1.Fleet) {
 			UID:       "1234",
 		},
 		Spec: agonesv1.FleetSpec{
-			Replicas: 8,
-			Template: agonesv1.GameServerTemplateSpec{},
+			Replicas:   8,
+			Scheduling: apis.Packed,
+			Template:   agonesv1.GameServerTemplateSpec{},
 		},
 		Status: agonesv1.FleetStatus{
 			Replicas:          5,
@@ -1245,7 +1227,8 @@ func defaultWebhookFixtures() (*autoscalingv1.FleetAutoscaler, *agonesv1.Fleet) 
 // newFakeController returns a controller, backed by the fake Clientset
 func newFakeController() (*Controller, agtesting.Mocks) {
 	m := agtesting.NewMocks()
-	c := NewController(healthcheck.NewHandler(), m.KubeClient, m.ExtClient, m.AgonesClient, m.AgonesInformerFactory)
+	counter := gameservers.NewPerNodeCounter(m.KubeInformerFactory, m.AgonesInformerFactory)
+	c := NewController(healthcheck.NewHandler(), m.KubeClient, m.ExtClient, m.AgonesClient, m.AgonesInformerFactory, counter)
 	c.recorder = m.FakeRecorder
 	return c, m
 }

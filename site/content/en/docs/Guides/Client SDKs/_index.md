@@ -65,14 +65,21 @@ Calling any of state changing functions mentioned below does not guarantee that 
 Functions which changes GameServer state or settings are:
 
 1. Ready()
-1. Shutdown()
-1. SetLabel()
-1. SetAnnotation()
-1. Allocate()
-1. Reserve() 
-1. Alpha().SetCapacity()
-1. Alpha().PlayerConnect()
-1. Alpha().PlayerDisconnect()
+2. Shutdown()
+3. SetLabel()
+4. SetAnnotation()
+5. Allocate()
+6. Reserve()
+7. Alpha().SetCapacity()
+8. Alpha().PlayerConnect()
+9. Alpha().PlayerDisconnect()
+10. Alpha().SetCounterCount()
+11. Alpha().IncrementCounter()
+12. Alpha().DecrementCounter()
+13. Alpha().SetCounterCapacity()
+14. Alpha().AppendListValue()
+15. Alpha().DeleteListValue()
+16. Alpha().SetListCapacity()
 
 ### Lifecycle Management
 
@@ -140,8 +147,8 @@ from Kubernetes when the backing Pod goes into Termination state.
 Be aware that if you use a variation of `System.exit(0)` after calling SDK.Shutdown(), your game server container may
 restart for a brief period, inline with our [Health Checking]({{% ref "/docs/Guides/health-checking.md#health-failure-strategy" %}}) policies. 
 
-If the `SDKGracefulTermination` alpha feature is enabled, when the SDK server receives the TERM signal before calling SDK.Shutdown(),
-the SDK server would stay alive for the period of the terminationGracePeriodSeconds until SDK.Shutdown() has been called
+If the SDK server receives a TERM signal before calling SDK.Shutdown(),
+the SDK server will stay alive for the period of the `terminationGracePeriodSeconds` until `SDK.Shutdown()` has been called.
 
 ### Configuration Retrieval 
 
@@ -221,13 +228,109 @@ in [SetLabel(...)](#setlabelkey-value) above. The isolation is also important as
 Setting `GameServer` annotations can be useful if you want information from your running game server process to be 
 observable through the Kubernetes API.
 
+### Counters And Lists
+
+{{< alpha title="Counters And Lists" gate="CountersAndLists" >}}
+
+The `Counters` and `Lists` features in the SDK offer a flexible configuration for tracking various entities like 
+players, rooms, and sessions.
+
+{{< alert title="Note" color="info">}}
+The SDK batches mutation operations every 1 second for performance reasons. However, changes made and subsequently 
+retrieved through the SDK will be atomically accurate through the SDK, as those values are tracked within the 
+SDK Server sidecar process.
+
+However, changes made through Allocation or the Kubernetes API to `GameServer` List and Counter values will be 
+eventually consistent when being retrieved through the SDK.
+
+Since the SDK update operations back to the `GameServer.status` values is batched asynchronous, it is worth noting that
+any value incremented past a counter or list capacity may be silently truncated to the currently set capacity if 
+modified concurrently through the SDK and Allocation/Kubernetes API.
+{{< /alert >}}
+
+#### Counters
+
+All functions will return an error if the specified `key` is not predefined in the `GameServer.spec.counters` resource
+configuration.
+
+##### Alpha().GetCounterCount(key)
+
+This function retrieves the current count for a counter in the game server.
+
+##### Alpha().SetCounterCount(key, amount)
+
+This function sets the count to a given value. This operation overwrites any previous values and the new value cannot
+exceed the Counter's capacity.
+
+##### Alpha().IncrementCounter(key, amount)
+
+This function increments the count of a counter by a given non-negative value amount. The function returns an
+error if the Counter is already at capacity (at time of operation), indicating no increment will occur.
+
+##### Alpha().DecrementCounter(key, amount)
+
+This function decreases the count of a counter by a given non-negative amount. It returns an error if the
+Counter's count is already at zero.
+
+##### Alpha().SetCounterCapacity(key, amount)
+
+This function sets the maximum capacity for a counter. A capacity value of 0 indicates no capacity limit.
+
+##### Alpha().GetCounterCapacity(key)
+
+This function retrieves the maximum capacity of a counter.
+
+#### Lists
+
+All functions will return an error if the specified `key` is not predefined in the `GameServer.spec.lists` resource
+configuration.
+
+##### Alpha().AppendListValue(key, value)
+
+This function appends the specified string value to a List's values.
+
+An error is returned if the string already exists in the list or if the list is at capacity.
+
+##### Alpha().DeleteListValue(key, value)
+
+This function removes the specific string value string from a List's values. 
+
+An error is returned if the string does not exist in the list.
+
+##### Alpha().SetListCapacity(key, amount)
+
+This function sets the capacity for a specified List with the capacity value required to be
+between 0 and 1000.
+
+##### Alpha().GetListCapacity(key)
+
+This function retrieves the capacity of a specified list.
+
+##### Alpha().ListContains(key, value)
+
+This function returns a boolean value on if a specific string value exists in a list's values. 
+
+##### Alpha().GetListLength(key)
+
+This function retrieves the number of items (length) in a  specified List.
+
+##### Alpha().GetListValues(key)
+
+This function returns an array of all the string values from a specified list.
+
 ### Player Tracking
 
 {{< alpha title="Player Tracking" gate="PlayerTracking" >}}
 
+{{< alert title="Warning" color="warning">}}
+[Counters and Lists](#counters-and-lists) will eventually replace the Alpha functionality of Player Tracking, which will subsequently be
+removed from Agones. If you are currently using this Alpha feature, we would love for you to test (and ideally migrate
+to!) this new functionality to ensure it will meet all your needs.
+{{< /alert >}}
+
 #### Alpha().PlayerConnect(playerID)
 
-This function increases the SDK’s stored player count by one, and appends this playerID to 
+This function increases the SDK’s stored player count by one, and appends this playerID to
 `GameServer.Status.Players.IDs`.
 
 [`GameServer.Status.Players.Count` and `GameServer.Status.Players.IDs`][playerstatus]
@@ -247,13 +350,13 @@ the server has been reached. The playerID will not be added to the list of playe
 Do not use this method if you are manually managing `GameServer.Status.Players.IDs` and `GameServer.Status.Players.Count`
 through the Kubernetes API, as indeterminate results will occur.  
 {{< /alert >}}
-    
+
 #### Alpha().PlayerDisconnect(playerID)
 
-This function decreases the SDK’s stored player count by one, and removes the playerID from 
+This function decreases the SDK’s stored player count by one, and removes the playerID from
 [`GameServer.Status.Players.IDs`][playerstatus].
 
-`GameServer.Status.Players.Count` and `GameServer.Status.Players.IDs` are then set to 
+`GameServer.Status.Players.Count` and `GameServer.Status.Players.IDs` are then set to
 update the player count and id list a second from now,
 unless there is already an update pending, in which case the update joins that batch operation.
 
@@ -278,18 +381,18 @@ This function retrieves the current player capacity. This is always accurate fro
 even if the value has yet to be updated on the GameServer status resource.
 
 {{< alert title="Note" color="info">}}
-If `GameServer.Status.Players.Capacity` is set manually through the Kubernetes API, use `SDK.GameServer()` or 
+If `GameServer.Status.Players.Capacity` is set manually through the Kubernetes API, use `SDK.GameServer()` or
 `SDK.WatchGameServer()` instead to view this value.
 {{< /alert >}}
 
 #### Alpha().GetPlayerCount()
 
-This function retrieves the current player count. 
-This is always accurate from what has been set through this SDK, even if the value has yet to be updated on the 
+This function retrieves the current player count.
+This is always accurate from what has been set through this SDK, even if the value has yet to be updated on the
 GameServer status resource.
 
 {{< alert title="Note" color="info">}}
-If `GameServer.Status.Players.IDs` is set manually through the Kubernetes API, use SDK.GameServer() 
+If `GameServer.Status.Players.IDs` is set manually through the Kubernetes API, use SDK.GameServer()
 or SDK.WatchGameServer() instead to retrieve the current player count.
 {{< /alert >}}
 
@@ -300,7 +403,7 @@ been set through this SDK,
 even if the value has yet to be updated on the GameServer status resource.
 
 {{< alert title="Note" color="info">}}
-If `GameServer.Status.Players.IDs` is set manually through the Kubernetes API, use SDK.GameServer() 
+If `GameServer.Status.Players.IDs` is set manually through the Kubernetes API, use SDK.GameServer()
 or SDK.WatchGameServer() instead to determine connected status.
 {{< /alert >}}
 
@@ -310,7 +413,7 @@ This function returns the list of the currently connected player ids. This is al
 through this SDK, even if the value has yet to be updated on the GameServer status resource.
 
 {{< alert title="Note" color="info">}}
-If `GameServer.Status.Players.IDs` is set manually through the Kubernetes API, use SDK.GameServer() 
+If `GameServer.Status.Players.IDs` is set manually through the Kubernetes API, use SDK.GameServer()
 or SDK.WatchGameServer() instead to list the connected players.
 {{< /alert >}}
 

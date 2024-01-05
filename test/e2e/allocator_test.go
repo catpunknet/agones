@@ -83,7 +83,7 @@ func TestAllocatorWithDeprecatedRequired(t *testing.T) {
 
 	var response *pb.AllocationResponse
 	// wait for the allocation system to come online
-	err = wait.PollImmediate(2*time.Second, 5*time.Minute, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		// create the grpc client each time, as we may end up looking at an old cert
 		dialOpts, err := helper.CreateRemoteClusterDialOption(ctx, allocatorClientSecretNamespace, allocatorClientSecretName, tlsCA, framework)
 		if err != nil {
@@ -106,8 +106,7 @@ func TestAllocatorWithDeprecatedRequired(t *testing.T) {
 		helper.ValidateAllocatorResponse(t, response)
 
 		// let's do a re-allocation
-		if runtime.FeatureEnabled(runtime.FeatureStateAllocationFilter) && runtime.FeatureEnabled(runtime.FeaturePlayerAllocationFilter) {
-			logrus.Info("testing state allocation filter")
+		if runtime.FeatureEnabled(runtime.FeaturePlayerAllocationFilter) {
 			// nolint:staticcheck
 			request.PreferredGameServerSelectors[0].GameServerState = pb.GameServerSelector_ALLOCATED
 			allocatedResponse, err := grpcClient.Allocate(context.Background(), request)
@@ -178,7 +177,7 @@ func TestAllocatorWithSelectors(t *testing.T) {
 
 	var response *pb.AllocationResponse
 	// wait for the allocation system to come online
-	err = wait.PollImmediate(2*time.Second, 5*time.Minute, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		// create the grpc client each time, as we may end up looking at an old cert
 		dialOpts, err := helper.CreateRemoteClusterDialOption(ctx, allocatorClientSecretNamespace, allocatorClientSecretName, tlsCA, framework)
 		if err != nil {
@@ -201,13 +200,13 @@ func TestAllocatorWithSelectors(t *testing.T) {
 		helper.ValidateAllocatorResponse(t, response)
 
 		// let's do a re-allocation
-		if runtime.FeatureEnabled(runtime.FeatureStateAllocationFilter) && runtime.FeatureEnabled(runtime.FeaturePlayerAllocationFilter) {
-			logrus.Info("testing state allocation filter")
+		if runtime.FeatureEnabled(runtime.FeaturePlayerAllocationFilter) {
 			request.GameServerSelectors[0].GameServerState = pb.GameServerSelector_ALLOCATED
 			allocatedResponse, err := grpcClient.Allocate(context.Background(), request)
 			require.NoError(t, err)
 			require.Equal(t, response.GameServerName, allocatedResponse.GameServerName)
 			helper.ValidateAllocatorResponse(t, allocatedResponse)
+			assert.Equal(t, flt.ObjectMeta.Name, allocatedResponse.Metadata.Labels[agonesv1.FleetNameLabel])
 
 			// do a capacity based allocation
 			logrus.Info("testing capacity allocation filter")
@@ -276,7 +275,7 @@ func TestRestAllocatorWithDeprecatedRequired(t *testing.T) {
 	}
 
 	// wait for the allocation system to come online
-	err = wait.PollImmediate(2*time.Second, 5*time.Minute, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			logrus.WithError(err).Info("failed Allocate rest request")
@@ -340,7 +339,7 @@ func TestRestAllocatorWithSelectors(t *testing.T) {
 
 	// wait for the allocation system to come online
 	var response pb.AllocationResponse
-	err = wait.PollImmediate(2*time.Second, 5*time.Minute, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Do(req)
 		if err != nil {
 			logrus.WithError(err).Info("failed Allocate rest request")
@@ -427,7 +426,7 @@ func TestAllocatorCrossNamespace(t *testing.T) {
 	}
 
 	// wait for the allocation system to come online
-	err = wait.PollImmediate(2*time.Second, 5*time.Minute, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), 2*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		// create the grpc client each time, as we may end up looking at an old cert
 		dialOpts, err := helper.CreateRemoteClusterDialOption(ctx, namespaceA, allocatorClientSecretName, tlsCA, framework)
 		if err != nil {

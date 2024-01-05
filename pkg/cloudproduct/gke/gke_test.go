@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 func TestSyncPodPortsToGameServer(t *testing.T) {
@@ -76,10 +77,11 @@ func TestSyncPodPortsToGameServer(t *testing.T) {
 
 func TestValidateGameServer(t *testing.T) {
 	for name, tc := range map[string]struct {
+		edPods      bool
 		ports       []agonesv1.GameServerPort
 		scheduling  apis.SchedulingStrategy
 		safeToEvict agonesv1.EvictionSafe
-		want        []metav1.StatusCause
+		want        field.ErrorList
 	}{
 		"no ports => validated": {scheduling: apis.Packed},
 		"good ports => validated": {
@@ -106,7 +108,7 @@ func TestValidateGameServer(t *testing.T) {
 			safeToEvict: agonesv1.EvictionSafeAlways,
 			scheduling:  apis.Packed,
 		},
-		"bad policy => fails validation": {
+		"bad policy (no feature gates) => fails validation": {
 			ports: []agonesv1.GameServerPort{
 				{
 					Name:          "best-tcpudp",
@@ -129,36 +131,50 @@ func TestValidateGameServer(t *testing.T) {
 			},
 			safeToEvict: agonesv1.EvictionSafeOnUpgrade,
 			scheduling:  apis.Distributed,
-			want: []metav1.StatusCause{
+			want: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "scheduling"), "Distributed", "scheduling strategy must be Packed on GKE Autopilot"),
+				field.Invalid(field.NewPath("spec", "ports").Index(1).Child("portPolicy"), "Static", "portPolicy must be Dynamic on GKE Autopilot"),
+				field.Invalid(field.NewPath("spec", "ports").Index(2).Child("portPolicy"), "Static", "portPolicy must be Dynamic on GKE Autopilot"),
+				field.Invalid(field.NewPath("spec", "eviction", "safe"), "OnUpgrade", "eviction.safe OnUpgrade not supported on GKE Autopilot"),
+			},
+		},
+		"bad policy (GKEAutopilotExtendedDurationPods enabled) => fails validation but OnUpgrade works": {
+			edPods: true,
+			ports: []agonesv1.GameServerPort{
 				{
-					Type:    "FieldValueInvalid",
-					Message: "scheduling strategy must be Packed on GKE Autopilot",
-					Field:   "scheduling",
+					Name:          "best-tcpudp",
+					PortPolicy:    agonesv1.Dynamic,
+					ContainerPort: 4321,
+					Protocol:      agonesv1.ProtocolTCPUDP,
 				},
 				{
-					Type:    "FieldValueInvalid",
-					Message: "portPolicy must be Dynamic on GKE Autopilot",
-					Field:   "bad-udp.portPolicy",
+					Name:          "bad-udp",
+					PortPolicy:    agonesv1.Static,
+					ContainerPort: 1234,
+					Protocol:      corev1.ProtocolUDP,
 				},
 				{
-					Type:    "FieldValueInvalid",
-					Message: "portPolicy must be Dynamic on GKE Autopilot",
-					Field:   "another-bad-udp.portPolicy",
+					Name:          "another-bad-udp",
+					PortPolicy:    agonesv1.Static,
+					ContainerPort: 1234,
+					Protocol:      corev1.ProtocolUDP,
 				},
-				{
-					Type:    "FieldValueInvalid",
-					Message: "eviction.safe OnUpgrade not supported on GKE Autopilot",
-					Field:   "eviction.safe",
-				},
+			},
+			safeToEvict: agonesv1.EvictionSafeOnUpgrade,
+			scheduling:  apis.Distributed,
+			want: field.ErrorList{
+				field.Invalid(field.NewPath("spec", "scheduling"), "Distributed", "scheduling strategy must be Packed on GKE Autopilot"),
+				field.Invalid(field.NewPath("spec", "ports").Index(1).Child("portPolicy"), "Static", "portPolicy must be Dynamic on GKE Autopilot"),
+				field.Invalid(field.NewPath("spec", "ports").Index(2).Child("portPolicy"), "Static", "portPolicy must be Dynamic on GKE Autopilot"),
 			},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			causes := (&gkeAutopilot{}).ValidateGameServerSpec(&agonesv1.GameServerSpec{
+			causes := (&gkeAutopilot{useExtendedDurationPods: tc.edPods}).ValidateGameServerSpec(&agonesv1.GameServerSpec{
 				Ports:      tc.ports,
 				Scheduling: tc.scheduling,
 				Eviction:   &agonesv1.Eviction{Safe: tc.safeToEvict},
-			})
+			}, field.NewPath("spec"))
 			require.Equal(t, tc.want, causes)
 		})
 	}
@@ -206,7 +222,7 @@ func TestPodSeccompUnconfined(t *testing.T) {
 	}
 }
 
-func TestSetSafeToEvict(t *testing.T) {
+func TestSetEvictionNoExtended(t *testing.T) {
 	emptyPodAnd := func(f func(*corev1.Pod)) *corev1.Pod {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -275,7 +291,7 @@ func TestSetSafeToEvict(t *testing.T) {
 		},
 	} {
 		t.Run(desc, func(t *testing.T) {
-			err := (&gkeAutopilot{}).SetEviction(tc.eviction, tc.pod)
+			err := setEvictionNoExtended(tc.eviction, tc.pod)
 			if tc.wantErr {
 				assert.Error(t, err)
 				return

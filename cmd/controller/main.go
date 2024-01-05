@@ -25,21 +25,16 @@ import (
 	"time"
 
 	"agones.dev/agones/pkg"
-	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/client/clientset/versioned"
 	"agones.dev/agones/pkg/client/informers/externalversions"
 	"agones.dev/agones/pkg/cloudproduct"
 	"agones.dev/agones/pkg/fleetautoscalers"
 	"agones.dev/agones/pkg/fleets"
-	"agones.dev/agones/pkg/gameserverallocations"
 	"agones.dev/agones/pkg/gameservers"
 	"agones.dev/agones/pkg/gameserversets"
 	"agones.dev/agones/pkg/metrics"
-	"agones.dev/agones/pkg/util/apiserver"
-	"agones.dev/agones/pkg/util/https"
 	"agones.dev/agones/pkg/util/runtime"
 	"agones.dev/agones/pkg/util/signals"
-	"agones.dev/agones/pkg/util/webhooks"
 	"github.com/google/uuid"
 	"github.com/heptiolabs/healthcheck"
 	"github.com/pkg/errors"
@@ -166,10 +161,6 @@ func main() {
 	if err != nil {
 		logger.WithError(err).Fatal("Could not initialize cloud product")
 	}
-	// https server and the items that share the Mux for routing
-	httpsServer := https.NewServer(ctlConf.CertFile, ctlConf.KeyFile)
-	wh := webhooks.NewWebHook(httpsServer.Mux)
-	api := apiserver.NewAPIServer(httpsServer.Mux)
 
 	agonesInformerFactory := externalversions.NewSharedInformerFactory(agonesClient, defaultResync)
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, defaultResync)
@@ -224,21 +215,10 @@ func main() {
 		kubeClient, extClient, agonesClient, agonesInformerFactory)
 	fleetController := fleets.NewController(health, kubeClient, extClient, agonesClient, agonesInformerFactory)
 	fasController := fleetautoscalers.NewController(health,
-		kubeClient, extClient, agonesClient, agonesInformerFactory)
+		kubeClient, extClient, agonesClient, agonesInformerFactory, gsCounter)
 
 	rs = append(rs,
 		gsCounter, gsController, gsSetController, fleetController, fasController)
-
-	if !runtime.FeatureEnabled(runtime.FeatureSplitControllerAndExtensions) {
-		gameservers.NewExtensions(controllerHooks, wh)
-		gameserversets.NewExtensions(controllerHooks, wh)
-		fleets.NewExtensions(controllerHooks, wh)
-		fleetautoscalers.NewExtensions(wh)
-
-		gasController := gameserverallocations.NewExtensions(api, health, gsCounter, kubeClient, kubeInformerFactory,
-			agonesClient, agonesInformerFactory, 10*time.Second, 30*time.Second, ctlConf.AllocationBatchWaitTime)
-		rs = append(rs, httpsServer, gasController)
-	}
 
 	runRunner := func(r runner) {
 		if err := r.Run(ctx, ctlConf.NumWorkers); err != nil {
@@ -442,10 +422,30 @@ func (c *config) validate() []error {
 	if c.MaxPort < c.MinPort {
 		validationErrors = append(validationErrors, errors.New("max Port cannot be set less that the Min Port"))
 	}
-	resourceErrors := agonesv1.ValidateResource(c.SidecarCPURequest, c.SidecarCPULimit, corev1.ResourceCPU)
+	resourceErrors := validateResource(c.SidecarCPURequest, c.SidecarCPULimit, corev1.ResourceCPU)
 	validationErrors = append(validationErrors, resourceErrors...)
-	resourceErrors = agonesv1.ValidateResource(c.SidecarMemoryRequest, c.SidecarMemoryLimit, corev1.ResourceMemory)
+	resourceErrors = validateResource(c.SidecarMemoryRequest, c.SidecarMemoryLimit, corev1.ResourceMemory)
 	validationErrors = append(validationErrors, resourceErrors...)
+	return validationErrors
+}
+
+// validateResource validates limit or Memory CPU resources used for containers in pods
+// If a GameServer is invalid there will be > 0 values in
+// the returned array
+//
+// Moved from agones.dev/agones/pkg/apis/agones/v1 (#3255)
+func validateResource(request resource.Quantity, limit resource.Quantity, resourceName corev1.ResourceName) []error {
+	validationErrors := make([]error, 0)
+	if !limit.IsZero() && request.Cmp(limit) > 0 {
+		validationErrors = append(validationErrors, errors.Errorf("Request must be less than or equal to %s limit", resourceName))
+	}
+	if request.Cmp(resource.Quantity{}) < 0 {
+		validationErrors = append(validationErrors, errors.Errorf("Resource %s request value must be non negative", resourceName))
+	}
+	if limit.Cmp(resource.Quantity{}) < 0 {
+		validationErrors = append(validationErrors, errors.Errorf("Resource %s limit value must be non negative", resourceName))
+	}
+
 	return validationErrors
 }
 

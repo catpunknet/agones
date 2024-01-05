@@ -23,18 +23,21 @@ import (
 	"agones.dev/agones/pkg/apis"
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	"agones.dev/agones/pkg/client/informers/externalversions"
+	"agones.dev/agones/pkg/cloudproduct/eviction"
 	"agones.dev/agones/pkg/portallocator"
 	"agones.dev/agones/pkg/util/runtime"
 	"cloud.google.com/go/compute/metadata"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 )
 
 const (
 	hostPortAssignmentAnnotation = "autopilot.gke.io/host-port-assignment"
+	primaryContainerAnnotation   = "autopilot.gke.io/primary-container"
 
 	errPortPolicyMustBeDynamic      = "portPolicy must be Dynamic on GKE Autopilot"
 	errSchedulingMustBePacked       = "scheduling strategy must be Packed on GKE Autopilot"
@@ -51,7 +54,9 @@ var (
 	logger = runtime.NewLoggerWithSource("gke")
 )
 
-type gkeAutopilot struct{}
+type gkeAutopilot struct {
+	useExtendedDurationPods bool
+}
 
 // hostPortAssignment is the JSON structure of the `host-port-assignment` annotation
 //
@@ -91,7 +96,9 @@ func Detect(ctx context.Context, kc *kubernetes.Clientset) string {
 // Autopilot returns a GKE Autopilot cloud product
 //
 //nolint:revive // ignore the unexported return; implements ControllerHooksInterface
-func Autopilot() *gkeAutopilot { return &gkeAutopilot{} }
+func Autopilot() *gkeAutopilot {
+	return &gkeAutopilot{useExtendedDurationPods: runtime.FeatureEnabled(runtime.FeatureGKEAutopilotExtendedDurationPods)}
+}
 
 func (*gkeAutopilot) SyncPodPortsToGameServer(gs *agonesv1.GameServer, pod *corev1.Pod) error {
 	// If applyGameServerAddressAndPort has already filled in Status, SyncPodPortsToGameServer
@@ -124,42 +131,44 @@ func (*gkeAutopilot) NewPortAllocator(minPort, maxPort int32,
 
 func (*gkeAutopilot) WaitOnFreePorts() bool { return true }
 
-func (g *gkeAutopilot) ValidateGameServerSpec(gss *agonesv1.GameServerSpec) []metav1.StatusCause {
-	causes := g.ValidateScheduling(gss.Scheduling)
-	for _, p := range gss.Ports {
+func (g *gkeAutopilot) ValidateGameServerSpec(gss *agonesv1.GameServerSpec, fldPath *field.Path) field.ErrorList {
+	allErrs := g.ValidateScheduling(gss.Scheduling, fldPath.Child("scheduling"))
+	for i, p := range gss.Ports {
 		if p.PortPolicy != agonesv1.Dynamic {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Field:   fmt.Sprintf("%s.portPolicy", p.Name),
-				Message: errPortPolicyMustBeDynamic,
-			})
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("ports").Index(i).Child("portPolicy"), string(p.PortPolicy), errPortPolicyMustBeDynamic))
 		}
 	}
-	// See SetEviction comment below for why we block EvictionSafeOnUpgrade.
-	if gss.Eviction.Safe == agonesv1.EvictionSafeOnUpgrade {
-		causes = append(causes, metav1.StatusCause{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Field:   "eviction.safe",
-			Message: errEvictionSafeOnUpgradeInvalid,
-		})
+	// See SetEviction comment below for why we block EvictionSafeOnUpgrade, if Extended Duration pods aren't supported.
+	if !g.useExtendedDurationPods && gss.Eviction.Safe == agonesv1.EvictionSafeOnUpgrade {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("eviction").Child("safe"), string(gss.Eviction.Safe), errEvictionSafeOnUpgradeInvalid))
 	}
-	return causes
+	return allErrs
 }
 
-func (*gkeAutopilot) ValidateScheduling(ss apis.SchedulingStrategy) []metav1.StatusCause {
+func (*gkeAutopilot) ValidateScheduling(ss apis.SchedulingStrategy, fldPath *field.Path) field.ErrorList {
 	if ss != apis.Packed {
-		return []metav1.StatusCause{{
-			Type:    metav1.CauseTypeFieldValueInvalid,
-			Field:   "scheduling",
-			Message: errSchedulingMustBePacked,
-		}}
+		return field.ErrorList{
+			field.Invalid(fldPath, string(ss), errSchedulingMustBePacked),
+		}
 	}
 	return nil
 }
 
-func (*gkeAutopilot) MutateGameServerPodSpec(gss *agonesv1.GameServerSpec, podSpec *corev1.PodSpec) error {
-	podSpecSeccompUnconfined(podSpec)
+func (*gkeAutopilot) MutateGameServerPod(gss *agonesv1.GameServerSpec, pod *corev1.Pod) error {
+	setPrimaryContainer(pod, gss.Container)
+	podSpecSeccompUnconfined(&pod.Spec)
 	return nil
+}
+
+// setPrimaryContainer sets the autopilot.gke.io/primary-container annotation to the game server container.
+// This acts as a hint to Autopilot for which container to add resources to during resource adjustment.
+// See https://cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests#autopilot-resource-management
+// for more details.
+func setPrimaryContainer(pod *corev1.Pod, containerName string) {
+	if _, ok := pod.ObjectMeta.Annotations[primaryContainerAnnotation]; ok {
+		return
+	}
+	pod.ObjectMeta.Annotations[primaryContainerAnnotation] = containerName
 }
 
 // podSpecSeccompUnconfined sets to seccomp profile to `Unconfined` to avoid serious performance
@@ -176,22 +185,29 @@ func podSpecSeccompUnconfined(podSpec *corev1.PodSpec) {
 	podSpec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
 }
 
-// SetEviction sets disruption controls based on GameServer.Status.Eviction. For Autopilot:
+func (g *gkeAutopilot) SetEviction(ev *agonesv1.Eviction, pod *corev1.Pod) error {
+	if g.useExtendedDurationPods {
+		return eviction.SetEviction(ev, pod)
+	}
+	return setEvictionNoExtended(ev, pod)
+}
+
+// setEvictionNoExtended sets disruption controls based on GameServer.Status.Eviction. For Autopilot:
 //   - Since the safe-to-evict pod annotation is not supported if "false", we delete it (if it's set
 //     to anything else, we allow it - Autopilot only rejects "false").
 //   - OnUpgrade is not supported and rejected by validation above. Since we can't support
 //     safe-to-evict=false but can support a restrictive PDB, we can support Never and Always, but
 //     OnUpgrade doesn't make sense on Autopilot today. - an overly restrictive PDB prevents
 //     any sort of graceful eviction.
-func (*gkeAutopilot) SetEviction(eviction *agonesv1.Eviction, pod *corev1.Pod) error {
+func setEvictionNoExtended(ev *agonesv1.Eviction, pod *corev1.Pod) error {
 	if safeAnnotation := pod.ObjectMeta.Annotations[agonesv1.PodSafeToEvictAnnotation]; safeAnnotation == agonesv1.False {
 		delete(pod.ObjectMeta.Annotations, agonesv1.PodSafeToEvictAnnotation)
 	}
-	if eviction == nil {
+	if ev == nil {
 		return errors.New("No eviction value set. Should be the default value")
 	}
 	if _, exists := pod.ObjectMeta.Labels[agonesv1.SafeToEvictLabel]; !exists {
-		switch eviction.Safe {
+		switch ev.Safe {
 		case agonesv1.EvictionSafeAlways:
 			// For EvictionSafeAlways, we use a label value that does not match the
 			// agones-gameserver-safe-to-evict-false PDB. But we go ahead and label
@@ -201,7 +217,7 @@ func (*gkeAutopilot) SetEviction(eviction *agonesv1.Eviction, pod *corev1.Pod) e
 		case agonesv1.EvictionSafeNever:
 			pod.ObjectMeta.Labels[agonesv1.SafeToEvictLabel] = agonesv1.False
 		default:
-			return errors.Errorf("eviction.safe == %s, which webhook should have rejected on Autopilot", eviction.Safe)
+			return errors.Errorf("eviction.safe == %s, which webhook should have rejected on Autopilot", ev.Safe)
 		}
 	}
 	return nil

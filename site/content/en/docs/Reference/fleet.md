@@ -12,6 +12,7 @@ Like any other Kubernetes resource you describe a `Fleet`'s desired state via a 
 
 A full `Fleet` specification is available below and in the {{< ghlink href="examples/fleet.yaml" >}}example folder{{< /ghlink >}} for reference :
 
+
 ```yaml
 apiVersion: "agones.dev/v1"
 kind: Fleet
@@ -43,7 +44,7 @@ spec:
       maxSurge: 25%
       # the amount to decrements GameServers by. Defaults to 25%
       maxUnavailable: 25%
-  # [Stage:Alpha]
+  # [Stage:Beta]
   # [FeatureFlag:FleetAllocationOverflow]
   # Labels and/or Annotations to apply to overflowing GameServers when the number of Allocated GameServers is more
   # than the desired replicas on the underlying `GameServerSet`
@@ -53,6 +54,18 @@ spec:
       version: "" # empty an existing label value
     annotations:
       otherkey: setthisvalue
+  #
+  # [Stage:Alpha]
+  # [FeatureFlag:CountsAndLists]
+  # Which gameservers in the Fleet are most important to keep around - impacts scale down logic.
+  # priorities:
+  # - type: Counter # Sort by a “Counter”
+  #   key: player # The name of the Counter. No impact if no GameServer found.
+  #   order: Descending # Default is "Ascending" so smaller capacity will be removed first on down scaling.
+  # - type: List # Sort by a “List”
+  #   key: room # The name of the List. No impact if no GameServer found.
+  #   order: Ascending # Default is "Ascending" so smaller capacity will be removed first on down scaling.
+  #      
   template:
     # GameServer metadata
     metadata:
@@ -108,11 +121,18 @@ The `spec` field is the actual `Fleet` specification and it is composed as follo
   - `rollingUpdate` is only relevant when `type: RollingUpdate`
     - `maxSurge` is the amount to increment the new GameServers by. Defaults to 25%
     - `maxUnavailable` is the amount to decrements GameServers by. Defaults to 25%
-- `allocationOverflow` (Alpha, requires `FleetAllocationOverflow` flag) The labels and/or Annotations to apply to 
-  GameServers when the number of Allocated GameServers drops below the desired replicas on the underlying 
+- `allocationOverflow` (Beta, requires `FleetAllocationOverflow` flag) The labels and/or Annotations to apply to 
+  GameServers when the number of Allocated GameServers exceeds the desired replicas in the underlying 
   `GameServerSet`.
   - `labels` the map of labels to be applied
   - `annotations` the map of annotations to be applied
+  - `Fleet's Scheduling Strategy`: The GameServers associated with the GameServerSet are sorted based on either `Packed` or `Distributed` strategy.
+      - `Packed`: Agones maximizes resource utilization by trying to populate nodes that are already in use before allocating GameServers to other nodes.
+      - `Distributed`: Agones employs this strategy to spread out GameServer allocations, ensuring an even distribution of GameServers across the available nodes.
+- `priorities`: (Alpha, requires `CountsAndLists` feature flag): Defines which gameservers in the Fleet are most important to keep around - impacts scale down logic.
+  - `type`: Sort by a "Counter" or a "List".
+  - `key`: The name of the Counter or List. If not found on the GameServer, has no impact.
+  - `order`: Order: Sort by “Ascending” or “Descending”. “Descending” a bigger Capacity is preferred. “Ascending” would be smaller Capacity is preferred.
 - `template` a full `GameServer` configuration template.
    See the [GameServer]({{< relref "gameserver.md" >}}) reference for all available fields.
 

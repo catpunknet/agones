@@ -56,7 +56,7 @@ Follow the [Google Cloud Monitoring installation steps](#google-cloud-monitoring
 | agones_fleet_autoscalers_buffer_size                  | The buffer size of fleet autoscalers (count or percentage)                                                                                                                                  | gauge     |
 | agones_fleet_autoscalers_current_replicas_count       | The current replicas count as seen by autoscalers                                                                                                                                           | gauge     |
 | agones_fleet_autoscalers_desired_replicas_count       | The desired replicas count as seen by autoscalers                                                                                                                                           | gauge     |
-| agones_fleet_autoscalers_limited                      | The fleet autoscaler is capped (1)                                                                                                                                                          | gauge     |
+| agones_fleet_autoscalers_limited                      | The fleet autoscaler is outside the limits set by MinReplicas and MaxReplicas.                                                                                                              | gauge     |
 | agones_gameservers_node_count                         | The distribution of gameservers per node                                                                                                                                                    | histogram |
 | agones_nodes_count                                    | The count of nodes empty and with gameservers                                                                                                                                               | gauge     |
 | agones_gameservers_state_duration                     | The distribution of gameserver state duration in seconds. Note: this metric could have some missing samples by design. Do not use the `_total` counter as the real value for state changes. | histogram |
@@ -77,12 +77,10 @@ Follow the [Google Cloud Monitoring installation steps](#google-cloud-monitoring
 
 ### Dropping Metric Labels
 
-{{% beta title="Reset Metric Export on Fleet / Autoscaler deletion" gate="ResetMetricsOnDelete" %}}
 
 When a Fleet or FleetAutoscaler is deleted from the system, Agones will automatically clear metrics that utilise
 their name as a label from the exported metrics, so the metrics exported do not continuously grow in size over the
 lifecycle of the Agones installation.
-
 
 ## Dashboard
 

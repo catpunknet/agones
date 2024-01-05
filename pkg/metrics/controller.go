@@ -127,7 +127,7 @@ func NewController(
 
 	c.logger = runtime.NewLoggerWithType(c)
 
-	fInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = fInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: c.recordFleetChanges,
 		UpdateFunc: func(old, next interface{}) {
 			c.recordFleetChanges(next)
@@ -135,7 +135,7 @@ func NewController(
 		DeleteFunc: c.recordFleetDeletion,
 	})
 
-	fasInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = fasInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(added interface{}) {
 			c.recordFleetAutoScalerChanges(nil, added)
 		},
@@ -143,7 +143,7 @@ func NewController(
 		DeleteFunc: c.recordFleetAutoScalerDeletion,
 	})
 
-	gsInformer.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
+	_, _ = gsInformer.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: c.recordGameServerStatusChanges,
 	}, 0)
 
@@ -217,25 +217,13 @@ func (c *Controller) recordFleetAutoScalerChanges(old, next interface{}) {
 }
 
 func (c *Controller) recordFleetAutoScalerDeletion(obj interface{}) {
-	fas, ok := obj.(*autoscalingv1.FleetAutoscaler)
+	_, ok := obj.(*autoscalingv1.FleetAutoscaler)
 	if !ok {
 		return
 	}
 
-	if runtime.FeatureEnabled(runtime.FeatureResetMetricsOnDelete) {
-		if err := c.resyncFleetAutoScaler(); err != nil {
-			c.logger.WithError(err).Warn("Could not resync Fleet Autoscaler metrics")
-		}
-	} else {
-		ctx, _ := tag.New(context.Background(), tag.Upsert(keyName, fas.Name),
-			tag.Upsert(keyFleetName, fas.Spec.FleetName), tag.Upsert(keyNamespace, fas.Namespace))
-
-		// recording status
-		stats.Record(ctx,
-			fasCurrentReplicasStats.M(int64(0)),
-			fasDesiredReplicasStats.M(int64(0)),
-			fasAbleToScaleStats.M(int64(0)),
-			fasLimitedStats.M(int64(0)))
+	if err := c.resyncFleetAutoScaler(); err != nil {
+		c.logger.WithError(err).Warn("Could not resync Fleet Autoscaler metrics")
 	}
 }
 
@@ -253,23 +241,28 @@ func (c *Controller) recordFleetChanges(obj interface{}) {
 
 	c.recordFleetReplicas(f.Name, f.Namespace, f.Status.Replicas, f.Status.AllocatedReplicas,
 		f.Status.ReadyReplicas, f.Spec.Replicas, f.Status.ReservedReplicas)
+
+	if runtime.FeatureEnabled(runtime.FeatureCountsAndLists) {
+		if f.Status.Counters != nil {
+			c.recordCounters(f.Name, f.Namespace, f.Status.Counters)
+		}
+		if f.Status.Lists != nil {
+			c.recordLists(f.Name, f.Namespace, f.Status.Lists)
+		}
+	}
 }
 
 func (c *Controller) recordFleetDeletion(obj interface{}) {
-	f, ok := obj.(*agonesv1.Fleet)
+	_, ok := obj.(*agonesv1.Fleet)
 	if !ok {
 		return
 	}
 
-	if runtime.FeatureEnabled(runtime.FeatureResetMetricsOnDelete) {
-		if err := c.resyncFleets(); err != nil {
-			// If for some reason resync fails, the entire metric state for fleets
-			// will be reset whenever the next Fleet gets deleted, in which case
-			// we end up back in a healthy state - so we aren't going to actively retry.
-			c.logger.WithError(err).Warn("Could not resync Fleet Metrics")
-		}
-	} else {
-		c.recordFleetReplicas(f.Name, f.Namespace, 0, 0, 0, 0, 0)
+	if err := c.resyncFleets(); err != nil {
+		// If for some reason resync fails, the entire metric state for fleets
+		// will be reset whenever the next Fleet gets deleted, in which case
+		// we end up back in a healthy state - so we aren't going to actively retry.
+		c.logger.WithError(err).Warn("Could not resync Fleet Metrics")
 	}
 }
 
@@ -331,6 +324,40 @@ func (c *Controller) recordFleetReplicas(fleetName, fleetNamespace string, total
 		fleetsReplicasCountStats.M(int64(desired)))
 	recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "reserved")},
 		fleetsReplicasCountStats.M(int64(reserved)))
+}
+
+// nolint:dupl // Linter errors on lines are duplicate of recordLists
+func (c *Controller) recordCounters(fleetName, fleetNamespace string, counters map[string]agonesv1.AggregatedCounterStatus) {
+
+	ctx, _ := tag.New(context.Background(), tag.Upsert(keyName, fleetName), tag.Upsert(keyNamespace, fleetNamespace))
+
+	for counter, counterStatus := range counters {
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "allocated_count"), tag.Upsert(keyCounter, counter)},
+			fleetCountersStats.M(counterStatus.AllocatedCount))
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "allocated_capacity"), tag.Upsert(keyCounter, counter)},
+			fleetCountersStats.M(counterStatus.AllocatedCapacity))
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "total_count"), tag.Upsert(keyCounter, counter)},
+			fleetCountersStats.M(counterStatus.Count))
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "total_capacity"), tag.Upsert(keyCounter, counter)},
+			fleetCountersStats.M(counterStatus.Capacity))
+	}
+}
+
+// nolint:dupl // Linter errors on lines are duplicate of recordCounters
+func (c *Controller) recordLists(fleetName, fleetNamespace string, lists map[string]agonesv1.AggregatedListStatus) {
+
+	ctx, _ := tag.New(context.Background(), tag.Upsert(keyName, fleetName), tag.Upsert(keyNamespace, fleetNamespace))
+
+	for list, listStatus := range lists {
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "allocated_count"), tag.Upsert(keyList, list)},
+			fleetListsStats.M(listStatus.AllocatedCount))
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "allocated_capacity"), tag.Upsert(keyList, list)},
+			fleetListsStats.M(listStatus.AllocatedCapacity))
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "total_count"), tag.Upsert(keyList, list)},
+			fleetListsStats.M(listStatus.Count))
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "total_capacity"), tag.Upsert(keyList, list)},
+			fleetListsStats.M(listStatus.Capacity))
+	}
 }
 
 // recordGameServerStatusChanged records gameserver status changes, however since it's based

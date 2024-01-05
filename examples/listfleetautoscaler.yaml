@@ -1,3 +1,4 @@
+---
 # Copyright 2023 Google LLC All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,27 +23,26 @@
 #
 # For a full reference and details: https://agones.dev/site/docs/reference/fleetautoscaler/
 #
-
-apiVersion: "autoscaling.agones.dev/v1"
+apiVersion: autoscaling.agones.dev/v1
 kind: FleetAutoscaler
 metadata:
   name: fleet-autoscaler-list
 spec:
   fleetName: fleet-example
   policy:
-    type: List # List based autoscaling.
+    type: List  # List based autoscaling.
     list:
-      # The name of the List.
-      # Required.
+      # Key is the name of the List. Required field.
       key: rooms
-      # Size of a buffer based on the list capacity that is available over the current aggregate
-      # list length in the Fleet (available capacity).
-      # bufferSize can be specified either in absolute (i.e. 5) or percentage format (i.e. 5%)
-      # Required.
+      # BufferSize is the size of a buffer based on the List capacity that is available over the current
+      # aggregate List length in the Fleet (available capacity).
+      # It can be specified either as an absolute value (i.e. 5) or percentage format (i.e. 5%).
+      # Must be bigger than 0. Required field.
       bufferSize: 5
-      # Minimum aggregate list capacity that can be provided by this FleetAutoscaler.
-      # If minCapacity is not specified, the actual minimum capacity will be bufferSize.
+      # MinCapacity is the minimum aggregate List total capacity across the fleet.
+      # If BufferSize is specified as a percentage, MinCapacity is required must be greater than 0.
+      # If non zero, MinCapacity must be smaller than MaxCapacity and must be greater than or equal to BufferSize.
       minCapacity: 10
-      # Maximum aggregate list capacity that can be provided by this FleetAutoscaler.
-      # Required.
+      # MaxCapacity is the maximum aggregate List total capacity across the fleet.
+      # MaxCapacity must be greater than or equal to both MinCapacity and BufferSize. Required field.
       maxCapacity: 100

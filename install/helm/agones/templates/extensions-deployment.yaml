@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- $featureGates := include "agones.featureGates" . | fromYaml }}
-{{- if $featureGates.SplitControllerAndExtensions }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,15 +55,15 @@ spec:
     spec:
       affinity:
       {{- if .Values.agones.extensions.affinity }}
-      {{- if .Values.agones.system.requireDedicatedNode }}
-      {{- fail "agones.extensions.affinity and agones.system.requireDedicatedNode cannot be set at the same time!" }}
+      {{- if .Values.agones.requireDedicatedNodes }}
+      {{- fail "agones.extensions.affinity and agones.requireDedicatedNodes cannot be set at the same time!" }}
       {{- end}}
       {{- end}}
       {{- if .Values.agones.extensions.affinity }}
 {{ toYaml .Values.agones.extensions.affinity | indent 8 }}
       {{- else}}
         nodeAffinity:
-          {{- if .Values.agones.system.requireDedicatedNode }}
+          {{- if .Values.agones.requireDedicatedNodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
@@ -120,7 +118,7 @@ spec:
           value: {{ .Values.agones.cloudProduct | quote }}
 {{- if .Values.agones.extensions.persistentLogs }}
         - name: LOG_DIR
-          value: "/home/agones/logs"
+          value: "/logs"
         - name: LOG_SIZE_LIMIT_MB
           value: {{ .Values.agones.extensions.persistentLogsSizeLimitMB | quote }}
 {{- end }}
@@ -167,11 +165,11 @@ spec:
 {{- end }}
         volumeMounts:
         - name: certs
-          mountPath: /home/agones/certs
+          mountPath: /certs
           readOnly: true
 {{- if .Values.agones.extensions.persistentLogs }}
         - name: logs
-          mountPath: /home/agones/logs
+          mountPath: /logs
           readOnly: false
 {{- end }}
       volumes:
@@ -209,4 +207,3 @@ spec:
       app: {{ template "agones.name" . }}
       release: {{ .Release.Name }}
       heritage: {{ .Release.Service }}
-{{- end }}

@@ -7,15 +7,13 @@ description: >
 publishDate: 2023-02-28
 ---
 
-{{< beta title="split controller and extensions" gate="SplitControllerAndExtensions" >}}
 
 ## High Availability for Agones Controller
 
-When `SplitControllerAndExtensions` is enabled, the `agones-controller` responsibility is split up into `agones-controller`, which enacts the Agones control loop, and `agones-extensions`, which acts as a service endpoint for webhooks and the allocation extension API. Splitting these responsibilities allows the `agones-extensions` pod to be **horizontally scaled**, making the Agones control plane **highly available** and more **resiliant to disruption**.
 
-`SplitControllerAndExtensions` enables multiple `agones-controller` pods, with a primary controller selected via leader election. Having multiple `agones-controller` minimizes downtime of the service from pod disruptions such as deployment updates, autoscaler evictions, and crashes.
+The `agones-controller` responsibility is split up into `agones-controller`, which enacts the Agones control loop, and `agones-extensions`, which acts as a service endpoint for webhooks and the allocation extension API. Splitting these responsibilities allows the `agones-extensions` pod to be **horizontally scaled**, making the Agones control plane **highly available** and more **resiliant to disruption**.
 
-`SplitControllerAndExtensions` must be enabled for GKE Autopilot.
+Multiple `agones-controller` pods enabled, with a primary controller selected via leader election. Having multiple `agones-controller` minimizes downtime of the service from pod disruptions such as deployment updates, autoscaler evictions, and crashes.
 
 ## Extension Pod Configrations 
 
@@ -34,9 +32,10 @@ An important configuration to note is the PodDisruptionBudget fields, `agones.ex
 
 ## Deployment Considerations
 
-Leader election will automatically be enabled when `SplitControllerAndExtensions` is enabled and `agones.controller.replicas` is > 1. [`agones.controller.replicas`]({{< relref "/docs/Installation/Install Agones/helm.md#configuration" >}}) defaults to 2.
 
-When `SplitControllerAndExtensions` is enabled, what was previously a single `agones-controller` pod is deployed by default as 2 `agones-controller` and 2 `agones-extensions` pods. For example:
+Leader election will automatically be enabled and `agones.controller.replicas` is > 1. [`agones.controller.replicas`]({{< relref "/docs/Installation/Install Agones/helm.md#configuration" >}}) defaults to 2.
+
+The default configuration now deploys 2 `agones-controller` pods and 2 `agones-extensions` pods, replacing the previous single `agones-controller` pod setup. For example:
 
 ```
 NAME                                 READY   STATUS    RESTARTS   AGE
@@ -57,4 +56,4 @@ We expect the aggregate memory consumption of the pods will be slightly higher t
 
 ## Feature Design
 
-`SplitControllerAndExtensions` represents phase 1 of [HA Agones](https://github.com/googleforgames/agones/issues/2797). The remaining phases are not yet implemented.
+Please see [HA Agones](https://github.com/googleforgames/agones/issues/2797).

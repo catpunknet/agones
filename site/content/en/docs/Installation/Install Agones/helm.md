@@ -80,21 +80,7 @@ The following tables lists the configurable parameters of the Agones chart and t
 
 ### General
 
-{{% feature expiryVersion="1.33.0" %}}
 
-| Parameter                                                | Description                                                                                                                                                                                                                                                                                                      | Default                                   |
-|----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------|
-| `agones.featureGates`                                    | A URL query encoded string of Flags to enable/disable e.g. `Example=true&OtherThing=false`. Any value accepted by [strconv.ParseBool(string)](https://golang.org/pkg/strconv/#ParseBool) can be used as a boolean value                                                                                          | \`\`                                      |
-| `agones.rbacEnabled`                                     | Creates RBAC resources. Must be set for any cluster configured with RBAC                                                                                                                                                                                                                                         | `true`                                    |
-| `agones.registerWebhooks`                                | Registers the webhooks used for the admission controller                                                                                                                                                                                                                                                         | `true`                                    |
-| `agones.registerApiService`                              | Registers the apiservice(s) used for the Kubernetes API extension                                                                                                                                                                                                                                                | `true`                                    |
-| `agones.registerServiceAccounts`                         | Attempts to create service accounts for the controllers                                                                                                                                                                                                                                                          | `true`                                    |
-| `agones.createPriorityClass`                             | Attempts to create priority classes for the controllers                                                                                                                                                                                                                                                          | `true`                                    |
-| `agones.priorityClassName`                               | Name of the priority classes to create                                                                                                                                                                                                                                                                           | `agones-system`                           |
-
-{{% /feature %}}
-
-{{% feature publishVersion="1.33.0" %}}
 
 | Parameter                            | Description                                                                                                                                                                                                             | Default         |
 |--------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------|
@@ -105,16 +91,17 @@ The following tables lists the configurable parameters of the Agones chart and t
 | `agones.registerServiceAccounts`     | Attempts to create service accounts for the controllers                                                                                                                                                                 | `true`          |
 | `agones.createPriorityClass`         | Attempts to create priority classes for the controllers                                                                                                                                                                 | `true`          |
 | `agones.priorityClassName`           | Name of the priority classes to create                                                                                                                                                                                  | `agones-system` |
-| `agones.system.requireDedicatedNode` | Forces Agones system components to be scheduled on dedicated nodes, only applies to the GKE Standard without node auto-provisioning                                                                                     | `false`         |
+| `agones.requireDedicatedNodes` | Forces Agones system components to be scheduled on dedicated nodes, only applies to the GKE Standard without node auto-provisioning                                                                                     | `false`         |
 
-{{% /feature %}}
 
 ### Custom Resource Definitions
+
 
 | Parameter                                                | Description                                                                                                                                                                                                                                                                                                      | Default                                   |
 |----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------|
 | `agones.crds.install`                                    | Install the CRDs with this chart. Useful to disable if you want to subchart (since crd-install hook is broken), so you can copy the CRDs into your own chart.                                                                                                                                                    | `true`                                    |
 | `agones.crds.cleanupOnDelete`                            | Run the pre-delete hook to delete all GameServers and their backing Pods when deleting the helm chart, so that all CRDs can be removed on chart deletion                                                                                                                                                         | `true`                                    |
+| `agones.crds.cleanupJobTTL`                              | The number of seconds for Kubernetes to delete the associated Job and Pods of the pre-delete hook after it completes, regardless if the Job is successful or not. Set to `0` to disable cleaning up the Job or the associated Pods.                                                                              | `60`                                      |
 
 ### Metrics
 
@@ -160,13 +147,14 @@ The following tables lists the configurable parameters of the Agones chart and t
 | `agones.image.extensions.name`                           | Image name for extensions                                                                                                                                                                                                                                                                                        | `agones-extensions`                       |
 | `agones.image.extensions.pullPolicy`                     | Image pull policy for extensions                                                                                                                                                                                                                                                                                 | `IfNotPresent`                            |
 
+
 ### Agones Controller
 
 | Parameter                                                | Description                                                                                                                                                                                                                                                                                                      | Default                                   |
 |----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------|
-| `agones.controller.replicas`                             | The number of replicas to run in the `agones-controller` deployment. (Ignored unless [SplitControllerAndExtensions][split-controller] is enabled)                                                                                                                                                                | `2`                                       |
-| `agones.controller.pdb.minAvailable`                     | Description of the number of pods from that set that must still be available after the eviction, even in the absence of the evicted pod. Can be either an absolute number or a percentage. Mutually Exclusive with `maxUnavailable` (Ignored unless [SplitControllerAndExtensions][split-controller] is enabled) | `1`                                       |
-| `agones.controller.pdb.maxUnavailable`                   | Description of the number of pods from that set that can be unavailable after the eviction. It can be either an absolute number or a percentage Mutually Exclusive with `minAvailable` (Ignored unless [SplitControllerAndExtensions][split-controller] is enabled)                                              | \`\`                                      |
+| `agones.controller.replicas`                             | The number of replicas to run in the `agones-controller` deployment.                                                                                                                                                                | `2`                                       |
+| `agones.controller.pdb.minAvailable`                     | Description of the number of pods from that set that must still be available after the eviction, even in the absence of the evicted pod. Can be either an absolute number or a percentage. Mutually Exclusive with `maxUnavailable`  | `1`                                       |
+| `agones.controller.pdb.maxUnavailable`                   | Description of the number of pods from that set that can be unavailable after the eviction. It can be either an absolute number or a percentage Mutually Exclusive with `minAvailable`                                              | \`\`                                      |
 | `agones.controller.http.port`                            | Port to use for liveness probe service and metrics                                                                                                                                                                                                                                                               | `8080`                                    |
 | `agones.controller.healthCheck.initialDelaySeconds`      | Initial delay before performing the first probe (in seconds)                                                                                                                                                                                                                                                     | `3`                                       |
 | `agones.controller.healthCheck.periodSeconds`            | Seconds between every liveness probe (in seconds)                                                                                                                                                                                                                                                                | `3`                                       |
@@ -239,24 +227,27 @@ The following tables lists the configurable parameters of the Agones chart and t
 |----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------|
 | `agones.allocator.apiServerQPS`                          | Maximum sustained queries per second that an allocator should be making against API Server                                                                                                                                                                                                                       | `400`                                     |
 | `agones.allocator.apiServerQPSBurst`                     | Maximum burst queries per second that an allocator should be making against API Server                                                                                                                                                                                                                           | `500`                                     |
-| `agones.allocator.allocationTimeout`                     | Remote allocation call timeout.                                                                                                                                                                                                                                                                                  | `10s`                                     |
-| `agones.allocator.remoteAllocationTimeout`               | Total remote allocation timeout including retries.                                                                                                                                                                                                                                                               | `30s`                                     |
+| `agones.allocator.remoteAllocationTimeout`                     | Remote allocation call timeout.                                                                                                                                                                                                                                                                                  | `10s`                                     |
+| `agones.allocator.totalRemoteAllocationTimeout`               | Total remote allocation timeout including retries.                                                                                                                                                                                                                                                               | `30s`                                     |
 | `agones.allocator.logLevel`                              | Agones Allocator Log level. Log only entries with that severity and above                                                                                                                                                                                                                                        | `info`                                    |
 | `agones.allocator.install`                               | Whether to install the [allocator service][allocator]                                                                                                                                                                                                                                                            | `true`                                    |
 | `agones.allocator.replicas`                              | The number of replicas to run in the deployment                                                                                                                                                                                                                                                                  | `3`                                       |
 | `agones.allocator.service.name`                          | Service name for the allocator                                                                                                                                                                                                                                                                                   | `agones-allocator`                        |
 | `agones.allocator.service.serviceType`                   | The [Service Type][service] of the HTTP Service                                                                                                                                                                                                                                                                  | `LoadBalancer`                            |
-| `agones.allocator.service.http.nodePort`                 | If the ServiceType is set to "NodePort",  this is the NodePort that the allocator http service is exposed on.                                                                                                                                                                                                    | `30000-32767`                             |
+| `agones.allocator.service.clusterIP`                     | The [Cluster IP][clusterIP] of the Agones allocator. If you want [Headless Service][headless-service] for Agones Allocator, you can set `None` to clusterIP.                                                                                                                                                     | \`\`                                      |
 | `agones.allocator.service.loadBalancerIP`                | The [Load Balancer IP][loadBalancer] of the Agones allocator load balancer. Only works if the Kubernetes provider supports this option.                                                                                                                                                                          | \`\`                                      |
 | `agones.allocator.service.loadBalancerSourceRanges`      | The [Load Balancer SourceRanges][loadBalancer] of the Agones allocator load balancer. Only works if the Kubernetes provider supports this option.                                                                                                                                                                | `[]`                                      |
 | `agones.allocator.service.annotations`                   | [Annotations][annotations] added to the Agones allocator service                                                                                                                                                                                                                                                 | `{}`                                      |
 | `agones.allocator.service.http.enabled`                  | If true the [allocator service][allocator] will respond to [REST requests][rest-requests]                                                                                                                                                                                                                        | `true`                                    |
+| `agones.allocator.service.http.appProtocol`              | The `appProtocol` to set on the Service for the http allocation port. If left blank, no value is set.                                                                                                                                                                                                            | ``                                        |
 | `agones.allocator.service.http.port`                     | The port that is exposed externally by the [allocator service][allocator] for [REST requests][rest-requests]                                                                                                                                                                                                     | `443`                                     |
 | `agones.allocator.service.http.portName`                 | The name of exposed port                                                                                                                                                                                                                                                                                         | `http`                                    |
 | `agones.allocator.service.http.targetPort`               | The port that is used by the allocator pod to listen for [REST requests][rest-requests]. Note that the allocator server cannot bind to low numbered ports.                                                                                                                                                       | `8443`                                    |
+| `agones.allocator.service.http.nodePort`                 | If the ServiceType is set to "NodePort",  this is the NodePort that the allocator http service is exposed on.                                                                                                                                                                                                    | `30000-32767`                             |
 | `agones.allocator.service.grpc.enabled`                  | If true the [allocator service][allocator] will respond to [gRPC requests][grpc-requests]                                                                                                                                                                                                                        | `true`                                    |
 | `agones.allocator.service.grpc.port`                     | The port that is exposed externally by the [allocator service][allocator] for [gRPC requests][grpc-requests]                                                                                                                                                                                                     | `443`                                     |
 | `agones.allocator.service.grpc.portName`                 | The name of exposed port                                                                                                                                                                                                                                                                                         | ``                                        |
+| `agones.allocator.service.grpc.appProtocol`                 | The `appProtocol` to set on the Service for the gRPC allocation port. If left blank, no value is set.                                                                                                                                                                                                    | ``                             |
 | `agones.allocator.service.grpc.nodePort`                 | If the ServiceType is set to "NodePort",  this is the NodePort that the allocator gRPC service is exposed on.                                                                                                                                                                                                    | `30000-32767`                             |
 | `agones.allocator.service.grpc.targetPort`               | The port that is used by the allocator pod to listen for [gRPC requests][grpc-requests]. Note that the allocator server cannot bind to low numbered ports.                                                                                                                                                       | `8443`                                    |
 | `agones.allocator.generateClientTLS`                     | Set to true to generate client TLS certificates or false to provide certificates in `certs/allocator/allocator-client.default/*`                                                                                                                                                                                 | `true`                                    |
@@ -285,6 +276,7 @@ The following tables lists the configurable parameters of the Agones chart and t
 | `agones.allocator.pdb.enabled`                           | Set to `true` to enable the creation of a [PodDisruptionBudget](https://kubernetes.io/docs/tasks/run-application/configure-pdb/) for the allocator deployment                                                                                                                                                    | `false`                                   |
 | `agones.allocator.pdb.minAvailable`                      | Description of the number of pods from that set that must still be available after the eviction, even in the absence of the evicted pod. Can be either an absolute number or a percentage. Mutually Exclusive with `maxUnavailable`                                                                              | `1`                                       |
 | `agones.allocator.pdb.maxUnavailable`                    | Description of the number of pods from that set that can be unavailable after the eviction. It can be either an absolute number or a percentage. Mutually Exclusive with `minAvailable`                                                                                                                          | \`\`                                      |
+
 
 ### Extensions
 
@@ -344,6 +336,8 @@ The following tables lists the configurable parameters of the Agones chart and t
 [memory-constraints]: https://kubernetes.io/docs/tasks/administer-cluster/manage-resources/memory-constraint-namespace/
 [ping]: {{< ref "/docs/Guides/ping-service.md" >}}
 [service]: https://kubernetes.io/docs/concepts/services-networking/service/
+[clusterIP]: https://kubernetes.io/docs/concepts/services-networking/service/#type-clusterip
+[headless-service]: https://kubernetes.io/docs/concepts/services-networking/service/#headless-services
 [allocator]: {{< ref "/docs/advanced/allocator-service.md" >}}
 [loadBalancer]: https://kubernetes.io/docs/concepts/services-networking/service/#loadbalancer
 [annotations]: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
@@ -440,34 +434,69 @@ cat <<EOF | kubectl apply -f -
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: my-release-cert
+  name: my-release-agones-cert
   namespace: agones-system
 spec:
   dnsNames:
     - agones-controller-service.agones-system.svc
-  secretName: my-release-cert
+  secretName: my-release-agones-cert
   issuerRef:
     name: selfsigned
     kind: ClusterIssuer
 EOF
 ```
 
-After the certificates are generated, we will want to [inject caBundle](https://cert-manager.io/docs/concepts/ca-injector/) into controller webhook and disable controller secret creation by setting the following:
+After the certificates are generated, we will want to [inject caBundle](https://cert-manager.io/docs/concepts/ca-injector/) into the controller and extensions webhook and disable the controller and extensions secret creation through the following values.yaml file.:
 
+```yaml
+agones:
+  controller:
+    disableSecret: true
+    customCertSecretPath:
+    - key: ca.crt
+      path: ca.crt
+    - key: tls.crt
+      path: server.crt
+    - key: tls.key
+      path: server.key
+    allocationApiService:
+      annotations:
+        cert-manager.io/inject-ca-from: agones-system/my-release-agones-cert
+      disableCaBundle: true
+    validatingWebhook:
+      annotations:
+        cert-manager.io/inject-ca-from: agones-system/my-release-agones-cert
+      disableCaBundle: true
+    mutatingWebhook:
+      annotations:
+        cert-manager.io/inject-ca-from: agones-system/my-release-agones-cert
+      disableCaBundle: true
+  extensions:
+    disableSecret: true
+    customCertSecretPath:
+    - key: ca.crt
+      path: ca.crt
+    - key: tls.crt
+      path: server.crt
+    - key: tls.key
+      path: server.key
+    allocationApiService:
+      annotations:
+        cert-manager.io/inject-ca-from: agones-system/my-release-agones-cert
+      disableCaBundle: true
+    validatingWebhook:
+      annotations:
+        cert-manager.io/inject-ca-from: agones-system/my-release-agones-cert
+      disableCaBundle: true
+    mutatingWebhook:
+      annotations:
+        cert-manager.io/inject-ca-from: agones-system/my-release-agones-cert
+      disableCaBundle: true
+```
+
+After copying the above yaml into a `values.yaml` file, use below command to install Agones:
 ```bash
-helm install my-release \
-  --set agones.controller.disableSecret=true \
-  --set agones.controller.customCertSecretPath[0].key='ca.crt',customCertSecretPath[0].path='ca.crt'
-  --set agones.controller.customCertSecretPath[1].key='tls.crt',customCertSecretPath[1].path='server.crt'
-  --set agones.controller.customCertSecretPath[2].key='tls.key',customCertSecretPath[2].path='server.key'
-  --set agones.controller.allocationApiService.annotations={'cert-manager.io/inject-ca-from': 'agones-system/my-release-cert'} \
-  --set agones.controller.allocationApiService.disableCaBundle=true \
-  --set agones.controller.validatingWebhook.annotations={'cert-manager.io/inject-ca-from': 'agones-system/my-release-cert'} \
-  --set agones.controller.validatingWebhook.disableCaBundle=true \
-  --set agones.controller.mutatingWebhook.annotations={'cert-manager.io/inject-ca-from': 'agones-system/my-release-cert'} \
-  --set agones.controller.mutatingWebhook.disableCaBundle=true \
-  --namespace agones-system --create-namespace  \
-  agones/agones
+helm install my-release --namespace agones-system --create-namespace --values values.yaml agones/agones
 ```
 
 ## Reserved Allocator Load Balancer IP

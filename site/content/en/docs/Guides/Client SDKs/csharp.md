@@ -7,11 +7,42 @@ description: "This is the C# version of the Agones Game Server Client SDK."
 publishDate: 2020-05-28
 ---
 
-{{< alert title="Note" color="info" >}}
-The C# SDK will also be available as a NuGet package in a future release.
-{{< /alert >}}
-
 Check the [Client SDK Documentation]({{< relref "_index.md" >}}) for more details on each of the SDK functions and how to run the SDK locally.
+
+
+## SDK Functionality
+
+| Area            | Action              | Implemented |
+|-----------------|---------------------|-------------|
+| Lifecycle       | Ready               | ✔️          |
+| Lifecycle       | Health              | ✔️          |
+| Lifecycle       | Reserve             | ✔️          |
+| Lifecycle       | Allocate            | ✔️          |
+| Lifecycle       | Shutdown            | ✔️          |
+| Configuration   | GetGameServer       | ✔️          |
+| Configuration   | WatchGameServer     | ✔️          |
+| Metadata        | SetAnnotation       | ✔️          |
+| Metadata        | SetLabel            | ✔️          |
+| Counters        | GetCounterCount     | ❌         |
+| Counters        | SetCounterCount     | ❌         |
+| Counters        | IncrementCounter    | ❌         |
+| Counters        | DecrementCounter    | ❌         |
+| Counters        | SetCounterCapacity  | ❌         |
+| Counters        | GetCounterCapacity  | ❌         |
+| Lists           | AppendListValue     | ❌         |
+| Lists           | DeleteListValue     | ❌         |
+| Lists           | SetListCapacity     | ❌         |
+| Lists           | GetListCapacity     | ❌         |
+| Lists           | ListContains        | ❌         |
+| Lists           | GetListLength       | ❌         |
+| Lists           | GetListValues       | ❌         |
+| Player Tracking | GetConnectedPlayers | ✔️          |
+| Player Tracking | GetPlayerCapacity   | ✔️          |
+| Player Tracking | GetPlayerCount      | ✔️          |
+| Player Tracking | IsPlayerConnected   | ✔️          |
+| Player Tracking | PlayerConnect       | ✔️          |
+| Player Tracking | PlayerDisconnect    | ✔️          |
+| Player Tracking | SetPlayerCapacity   | ✔️          |
 
 ## Download
 

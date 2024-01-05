@@ -20,7 +20,6 @@ import (
 	"time"
 
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
-	"agones.dev/agones/pkg/util/runtime"
 	e2eframework "agones.dev/agones/test/e2e/framework"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,10 +63,6 @@ func TestLeaderElectionAfterDeletingLeader(t *testing.T) {
 	logger := e2eframework.TestLogger(t)
 	gs := framework.DefaultGameServer(defaultNs)
 	ctx := context.Background()
-
-	if !runtime.FeatureEnabled(runtime.FeatureSplitControllerAndExtensions) {
-		t.Skip("Skip test. SplitControllerAndExtensions feature is not enabled")
-	}
 
 	err := waitForAgonesControllerRunning(ctx, -1)
 	require.NoError(t, err, "Could not ensure controller running")
@@ -118,7 +113,7 @@ func deleteAgonesControllerPods(ctx context.Context) error {
 }
 
 func waitForAgonesControllerRunning(ctx context.Context, wantReplicas int) error {
-	return wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		list, err := getAgonesControllerPods(ctx)
 		if err != nil {
 			return true, err

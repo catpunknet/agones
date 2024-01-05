@@ -1,4 +1,4 @@
-// Copyright 2022 Google LLC All Rights Reserved.
+// Copyright 2023 Google LLC All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,9 @@ package swagger
 type SdkGameServerStatus struct {
 	State string `json:"state,omitempty"`
 	Address string `json:"address,omitempty"`
+	Addresses []StatusAddress `json:"addresses,omitempty"`
 	Ports []StatusPort `json:"ports,omitempty"`
 	Players *StatusPlayerStatus `json:"players,omitempty"`
+	Counters map[string]StatusCounterStatus `json:"counters,omitempty"`
+	Lists map[string]StatusListStatus `json:"lists,omitempty"`
 }

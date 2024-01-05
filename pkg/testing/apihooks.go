@@ -18,7 +18,7 @@ import (
 	"agones.dev/agones/pkg/apis"
 	agonesv1 "agones.dev/agones/pkg/apis/agones/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // FakeAPIHooks is a no-op, fake implementation of APIHooks
@@ -28,17 +28,17 @@ type FakeAPIHooks struct {
 var _ agonesv1.APIHooks = FakeAPIHooks{}
 
 // ValidateGameServerSpec is called by GameServer.Validate to allow for product specific validation.
-func (f FakeAPIHooks) ValidateGameServerSpec(_ *agonesv1.GameServerSpec) []metav1.StatusCause {
+func (f FakeAPIHooks) ValidateGameServerSpec(_ *agonesv1.GameServerSpec, _ *field.Path) field.ErrorList {
 	return nil
 }
 
 // ValidateScheduling is called by Fleet and GameServerSet Validate() to allow for product specific validation of scheduling strategy.
-func (f FakeAPIHooks) ValidateScheduling(_ apis.SchedulingStrategy) []metav1.StatusCause {
+func (f FakeAPIHooks) ValidateScheduling(_ apis.SchedulingStrategy, _ *field.Path) field.ErrorList {
 	return nil
 }
 
-// MutateGameServerPodSpec is called by createGameServerPod to allow for product specific pod mutation.
-func (f FakeAPIHooks) MutateGameServerPodSpec(_ *agonesv1.GameServerSpec, podSpec *corev1.PodSpec) error {
+// MutateGameServerPod is called by createGameServerPod to allow for product specific pod mutation.
+func (f FakeAPIHooks) MutateGameServerPod(_ *agonesv1.GameServerSpec, pod *corev1.Pod) error {
 	return nil
 }
 

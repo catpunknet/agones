@@ -91,7 +91,7 @@ func NewMigrationController(health healthcheck.Handler,
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
 	mc.recorder = eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "migration-controller"})
 
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*corev1.Pod)
 			if isActiveGameServerWithNode(pod) {
@@ -110,13 +110,13 @@ func NewMigrationController(health healthcheck.Handler,
 
 // Run processes the rate limited queue.
 // Will block until stop is closed
-func (mc *MigrationController) Run(ctx context.Context) error {
+func (mc *MigrationController) Run(ctx context.Context, workers int) error {
 	mc.baseLogger.Debug("Wait for cache sync")
 	if !cache.WaitForCacheSync(ctx.Done(), mc.nodeSynced, mc.gameServerSynced, mc.podSynced) {
 		return errors.New("failed to wait for caches to sync")
 	}
 
-	mc.workerqueue.Run(ctx, 1)
+	mc.workerqueue.Run(ctx, workers)
 	return nil
 }
 

@@ -23,13 +23,16 @@ import (
 	"agones.dev/agones/pkg"
 	"agones.dev/agones/pkg/apis"
 	"agones.dev/agones/pkg/apis/agones"
+	"agones.dev/agones/pkg/util/apiserver"
 	"agones.dev/agones/pkg/util/runtime"
 	"github.com/mattbaird/jsonpatch"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // GameServerState is the state for the GameServer
@@ -136,6 +139,9 @@ const (
 	PodSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
 	// SafeToEvictLabel is a label that, when "false", matches the restrictive PDB agones-gameserver-safe-to-evict-false.
 	SafeToEvictLabel = agones.GroupName + "/safe-to-evict"
+	// GameServerErroredAtAnnotation is an annotation that records the timestamp the GameServer entered the
+	// error state. The timestamp is encoded in RFC3339 format.
+	GameServerErroredAtAnnotation = agones.GroupName + "/errored-at"
 
 	// True is the string "true" to appease the goconst lint.
 	True = "true"
@@ -207,10 +213,14 @@ type GameServerSpec struct {
 	// (Alpha, PlayerTracking feature flag) Players provides the configuration for player tracking features.
 	// +optional
 	Players *PlayersSpec `json:"players,omitempty"`
-	// (Alpha, CountsAndLists feature flag) Counters and Lists provides the configuration for generic tracking features.
+	// (Alpha, CountsAndLists feature flag) Counters provides the configuration for tracking of int64 values against a GameServer.
+	// Keys must be declared at GameServer creation time.
 	// +optional
 	Counters map[string]CounterStatus `json:"counters,omitempty"`
-	Lists    map[string]ListStatus    `json:"lists,omitempty"`
+	// (Alpha, CountsAndLists feature flag) Lists provides the configuration for tracking of lists of up to 1000 values against a GameServer.
+	// Keys must be declared at GameServer creation time.
+	// +optional
+	Lists map[string]ListStatus `json:"lists,omitempty"`
 	// Eviction specifies the eviction tolerance of the GameServer. Defaults to "Never".
 	// +optional
 	Eviction *Eviction `json:"eviction,omitempty"`
@@ -278,11 +288,14 @@ type SdkServer struct {
 // GameServerStatus is the status for a GameServer resource
 type GameServerStatus struct {
 	// GameServerState is the current state of a GameServer, e.g. Creating, Starting, Ready, etc
-	State         GameServerState        `json:"state"`
-	Ports         []GameServerStatusPort `json:"ports"`
-	Address       string                 `json:"address"`
-	NodeName      string                 `json:"nodeName"`
-	ReservedUntil *metav1.Time           `json:"reservedUntil"`
+	State   GameServerState        `json:"state"`
+	Ports   []GameServerStatusPort `json:"ports"`
+	Address string                 `json:"address"`
+	// Addresses is the array of addresses at which the GameServer can be reached; copy of Node.Status.addresses.
+	// +optional
+	Addresses     []corev1.NodeAddress `json:"addresses"`
+	NodeName      string               `json:"nodeName"`
+	ReservedUntil *metav1.Time         `json:"reservedUntil"`
 	// [Stage:Alpha]
 	// [FeatureFlag:PlayerTracking]
 	// +optional
@@ -312,13 +325,13 @@ type PlayerStatus struct {
 	IDs      []string `json:"ids"`
 }
 
-// CounterStatus stores the current counter values
+// CounterStatus stores the current counter values and maximum capacity
 type CounterStatus struct {
 	Count    int64 `json:"count"`
 	Capacity int64 `json:"capacity"`
 }
 
-// ListStatus stores the current list values
+// ListStatus stores the current list values and maximum capacity
 type ListStatus struct {
 	Capacity int64    `json:"capacity"`
 	Values   []string `json:"values"`
@@ -472,192 +485,142 @@ func (gs *GameServer) applyCountsListsStatus() {
 }
 
 // validateFeatureGates checks if fields are set when the associated feature gate is not set.
-func (gss *GameServerSpec) validateFeatureGates() []metav1.StatusCause {
-	var causes []metav1.StatusCause
-
+func (gss *GameServerSpec) validateFeatureGates(fldPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
 	if !runtime.FeatureEnabled(runtime.FeaturePlayerTracking) {
 		if gss.Players != nil {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueNotSupported,
-				Field:   "players",
-				Message: fmt.Sprintf("Value cannot be set unless feature flag %s is enabled", runtime.FeaturePlayerTracking),
-			})
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("players"), fmt.Sprintf("Value cannot be set unless feature flag %s is enabled", runtime.FeaturePlayerTracking)))
 		}
 	}
 
 	if !runtime.FeatureEnabled(runtime.FeatureCountsAndLists) {
 		if gss.Counters != nil {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueNotSupported,
-				Field:   "counters",
-				Message: fmt.Sprintf("Value cannot be set unless feature flag %s is enabled", runtime.FeatureCountsAndLists),
-			})
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("counters"), fmt.Sprintf("Value cannot be set unless feature flag %s is enabled", runtime.FeatureCountsAndLists)))
 		}
 		if gss.Lists != nil {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueNotSupported,
-				Field:   "lists",
-				Message: fmt.Sprintf("Value cannot be set unless feature flag %s is enabled", runtime.FeatureCountsAndLists),
-			})
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child("lists"), fmt.Sprintf("Value cannot be set unless feature flag %s is enabled", runtime.FeatureCountsAndLists)))
 		}
 	}
 
-	return causes
+	return allErrs
 }
 
 // Validate validates the GameServerSpec configuration.
 // devAddress is a specific IP address used for local Gameservers, for fleets "" is used
 // If a GameServer Spec is invalid there will be > 0 values in the returned array
-func (gss *GameServerSpec) Validate(apiHooks APIHooks, devAddress string) ([]metav1.StatusCause, bool) {
-	var causes []metav1.StatusCause
-
-	causes = append(causes, gss.validateFeatureGates()...)
-
-	if devAddress != "" {
+func (gss *GameServerSpec) Validate(apiHooks APIHooks, devAddress string, fldPath *field.Path) field.ErrorList {
+	allErrs := gss.validateFeatureGates(fldPath)
+	if len(devAddress) > 0 {
 		// verify that the value is a valid IP address.
 		if net.ParseIP(devAddress) == nil {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Field:   fmt.Sprintf("annotations.%s", DevAddressAnnotation),
-				Message: fmt.Sprintf("Value '%s' of annotation '%s' must be a valid IP address", devAddress, DevAddressAnnotation),
-			})
+			// Authentication is only required if the gameserver is created directly.
+			allErrs = append(allErrs, field.Invalid(field.NewPath("metadata", "annotations", DevAddressAnnotation), devAddress, "must be a valid IP address"))
 		}
 
-		for _, p := range gss.Ports {
+		for i, p := range gss.Ports {
 			if p.HostPort == 0 {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueRequired,
-					Field:   fmt.Sprintf("%s.hostPort", p.Name),
-					Message: fmt.Sprintf("HostPort is required if GameServer is annotated with '%s'", DevAddressAnnotation),
-				})
+				allErrs = append(allErrs, field.Required(fldPath.Child("ports").Index(i).Child("hostPort"), DevAddressAnnotation))
 			}
 			if p.PortPolicy != Static {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueRequired,
-					Field:   fmt.Sprintf("%s.portPolicy", p.Name),
-					Message: fmt.Sprint(ErrPortPolicyStatic),
-				})
+				allErrs = append(allErrs, field.Required(fldPath.Child("ports").Index(i).Child("portPolicy"), ErrPortPolicyStatic))
 			}
 		}
-	} else {
-		// make sure a name is specified when there is multiple containers in the pod.
-		if gss.Container == "" && len(gss.Template.Spec.Containers) > 1 {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Field:   "container",
-				Message: ErrContainerRequired,
-			})
-		}
 
-		// make sure the container value points to a valid container
-		_, _, err := gss.FindContainer(gss.Container)
-		if err != nil {
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueInvalid,
-				Field:   "container",
-				Message: err.Error(),
-			})
-		}
+		allErrs = append(allErrs, validateObjectMeta(&gss.Template.ObjectMeta, fldPath.Child("template", "metadata"))...)
+		return allErrs
+	}
 
-		// no host port when using dynamic PortPolicy
-		for _, p := range gss.Ports {
-			if p.PortPolicy == Dynamic || p.PortPolicy == Static {
-				if p.ContainerPort <= 0 {
-					causes = append(causes, metav1.StatusCause{
-						Type:    metav1.CauseTypeFieldValueInvalid,
-						Field:   fmt.Sprintf("%s.containerPort", p.Name),
-						Message: ErrContainerPortRequired,
-					})
-				}
-			}
+	// make sure a name is specified when there is multiple containers in the pod.
+	if gss.Container == "" && len(gss.Template.Spec.Containers) > 1 {
+		allErrs = append(allErrs, field.Required(fldPath.Child("container"), ErrContainerRequired))
+	}
 
-			if p.PortPolicy == Passthrough && p.ContainerPort > 0 {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueInvalid,
-					Field:   fmt.Sprintf("%s.containerPort", p.Name),
-					Message: ErrContainerPortPassthrough,
-				})
-			}
+	// make sure the container value points to a valid container
+	_, _, err := gss.FindContainer(gss.Container)
+	if err != nil {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("container"), gss.Container, err.Error()))
+	}
 
-			if p.HostPort > 0 && (p.PortPolicy == Dynamic || p.PortPolicy == Passthrough) {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueInvalid,
-					Field:   fmt.Sprintf("%s.hostPort", p.Name),
-					Message: ErrHostPort,
-				})
-			}
-
-			if p.Container != nil && gss.Container != "" {
-				_, _, err := gss.FindContainer(*p.Container)
-				if err != nil {
-					causes = append(causes, metav1.StatusCause{
-						Type:    metav1.CauseTypeFieldValueInvalid,
-						Field:   fmt.Sprintf("%s.container", p.Name),
-						Message: ErrContainerNameInvalid,
-					})
-				}
+	// no host port when using dynamic PortPolicy
+	for i, p := range gss.Ports {
+		path := fldPath.Child("ports").Index(i)
+		if p.PortPolicy == Dynamic || p.PortPolicy == Static {
+			if p.ContainerPort <= 0 {
+				allErrs = append(allErrs, field.Required(path.Child("containerPort"), ErrContainerPortRequired))
 			}
 		}
-		for _, c := range gss.Template.Spec.Containers {
-			validationErrors := validateResources(c)
-			for _, err := range validationErrors {
-				causes = append(causes, metav1.StatusCause{
-					Type:    metav1.CauseTypeFieldValueInvalid,
-					Field:   "container",
-					Message: err.Error(),
-				})
-			}
+
+		if p.PortPolicy == Passthrough && p.ContainerPort > 0 {
+			allErrs = append(allErrs, field.Required(path.Child("containerPort"), ErrContainerPortPassthrough))
 		}
-		if productCauses := apiHooks.ValidateGameServerSpec(gss); len(productCauses) > 0 {
-			causes = append(causes, productCauses...)
+
+		if p.HostPort > 0 && (p.PortPolicy == Dynamic || p.PortPolicy == Passthrough) {
+			allErrs = append(allErrs, field.Forbidden(path.Child("hostPort"), ErrHostPort))
+		}
+
+		if p.Container != nil && gss.Container != "" {
+			_, _, err := gss.FindContainer(*p.Container)
+			if err != nil {
+				allErrs = append(allErrs, field.Invalid(path.Child("container"), *p.Container, ErrContainerNameInvalid))
+			}
 		}
 	}
-	objMetaCauses := validateObjectMeta(&gss.Template.ObjectMeta)
-	if len(objMetaCauses) > 0 {
-		causes = append(causes, objMetaCauses...)
+	for i, c := range gss.Template.Spec.Containers {
+		path := fldPath.Child("template", "spec", "containers").Index(i)
+		allErrs = append(allErrs, ValidateResourceRequirements(&c.Resources, path.Child("resources"))...)
 	}
-	return causes, len(causes) == 0
+
+	allErrs = append(allErrs, apiHooks.ValidateGameServerSpec(gss, fldPath)...)
+	allErrs = append(allErrs, validateObjectMeta(&gss.Template.ObjectMeta, fldPath.Child("template", "metadata"))...)
+	return allErrs
 }
 
-// ValidateResource validates limit or Memory CPU resources used for containers in pods
-// If a GameServer is invalid there will be > 0 values in
-// the returned array
-func ValidateResource(request resource.Quantity, limit resource.Quantity, resourceName corev1.ResourceName) []error {
-	validationErrors := make([]error, 0)
-	if !limit.IsZero() && request.Cmp(limit) > 0 {
-		validationErrors = append(validationErrors, errors.Errorf("Request must be less than or equal to %s limit", resourceName))
-	}
-	if request.Cmp(resource.Quantity{}) < 0 {
-		validationErrors = append(validationErrors, errors.Errorf("Resource %s request value must be non negative", resourceName))
-	}
-	if limit.Cmp(resource.Quantity{}) < 0 {
-		validationErrors = append(validationErrors, errors.Errorf("Resource %s limit value must be non negative", resourceName))
+// ValidateResourceRequirements Validates resource requirement spec.
+func ValidateResourceRequirements(requirements *corev1.ResourceRequirements, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	limPath := fldPath.Child("limits")
+	reqPath := fldPath.Child("requests")
+
+	for resourceName, quantity := range requirements.Limits {
+		fldPath := limPath.Key(string(resourceName))
+		// Validate resource quantity.
+		allErrs = append(allErrs, ValidateNonnegativeQuantity(quantity, fldPath)...)
+
 	}
 
-	return validationErrors
+	for resourceName, quantity := range requirements.Requests {
+		fldPath := reqPath.Key(string(resourceName))
+		// Validate resource quantity.
+		allErrs = append(allErrs, ValidateNonnegativeQuantity(quantity, fldPath)...)
+
+		// Check that request <= limit.
+		limitQuantity, exists := requirements.Limits[resourceName]
+		if exists && quantity.Cmp(limitQuantity) > 0 {
+			allErrs = append(allErrs, field.Invalid(reqPath, quantity.String(), fmt.Sprintf("must be less than or equal to %s limit of %s", resourceName, limitQuantity.String())))
+		}
+	}
+	return allErrs
 }
 
-// validateResources validate CPU and Memory resources
-func validateResources(container corev1.Container) []error {
-	validationErrors := make([]error, 0)
-	resourceErrors := ValidateResource(container.Resources.Requests[corev1.ResourceCPU], container.Resources.Limits[corev1.ResourceCPU], corev1.ResourceCPU)
-	validationErrors = append(validationErrors, resourceErrors...)
-	resourceErrors = ValidateResource(container.Resources.Requests[corev1.ResourceMemory], container.Resources.Limits[corev1.ResourceMemory], corev1.ResourceMemory)
-	validationErrors = append(validationErrors, resourceErrors...)
-	return validationErrors
+// ValidateNonnegativeQuantity Validates that a Quantity is not negative
+func ValidateNonnegativeQuantity(value resource.Quantity, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if value.Cmp(resource.Quantity{}) < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath, value.String(), apimachineryvalidation.IsNegativeErrorMsg))
+	}
+	return allErrs
 }
 
 // Validate validates the GameServer configuration.
 // If a GameServer is invalid there will be > 0 values in
 // the returned array
-func (gs *GameServer) Validate(apiHooks APIHooks) ([]metav1.StatusCause, bool) {
-	causes := validateName(gs)
+func (gs *GameServer) Validate(apiHooks APIHooks) field.ErrorList {
+	allErrs := validateName(gs, field.NewPath("metadata"))
 
 	// make sure the host port is specified if this is a development server
 	devAddress, _ := gs.GetDevAddress()
-	gssCauses, _ := gs.Spec.Validate(apiHooks, devAddress)
-	causes = append(causes, gssCauses...)
-	return causes, len(causes) == 0
+	allErrs = append(allErrs, gs.Spec.Validate(apiHooks, devAddress, field.NewPath("spec"))...)
+	return allErrs
 }
 
 // GetDevAddress returns the address for game server.
@@ -782,7 +745,7 @@ func (gs *GameServer) Pod(apiHooks APIHooks, sidecars ...corev1.Container) (*cor
 
 	gs.podScheduling(pod)
 
-	if err := apiHooks.MutateGameServerPodSpec(&gs.Spec, &pod.Spec); err != nil {
+	if err := apiHooks.MutateGameServerPod(&gs.Spec, pod); err != nil {
 		return nil, err
 	}
 	if err := apiHooks.SetEviction(gs.Status.Eviction, pod); err != nil {
@@ -914,26 +877,26 @@ func (gs *GameServer) Patch(delta *GameServer) ([]byte, error) {
 
 // UpdateCount increments or decrements a CounterStatus on a Game Server by the given amount.
 func (gs *GameServer) UpdateCount(name string, action string, amount int64) error {
-	if !(action == GameServerAllocationIncrement || action == GameServerAllocationDecrement) {
-		return errors.Errorf("unable to UpdateCount with Name %s, Action %s, Amount %d. Allocation action must be one of %s or %s", name, action, amount, GameServerAllocationIncrement, GameServerAllocationDecrement)
+	if !(action == GameServerPriorityIncrement || action == GameServerPriorityDecrement) {
+		return errors.Errorf("unable to UpdateCount with Name %s, Action %s, Amount %d. Allocation action must be one of %s or %s", name, action, amount, GameServerPriorityIncrement, GameServerPriorityDecrement)
 	}
 	if amount < 0 {
 		return errors.Errorf("unable to UpdateCount with Name %s, Action %s, Amount %d. Amount must be greater than 0", name, action, amount)
 	}
 	if counter, ok := gs.Status.Counters[name]; ok {
 		cnt := counter.Count
-		if action == GameServerAllocationIncrement {
+		if action == GameServerPriorityIncrement {
 			cnt += amount
-			// only check for Count > Capacity when incrementing
-			if cnt > counter.Capacity {
-				return errors.Errorf("unable to UpdateCount with Name %s, Action %s, Amount %d. Incremented Count %d is greater than available capacity %d", name, action, amount, cnt, counter.Capacity)
-			}
 		} else {
 			cnt -= amount
-			// only check for Count < 0 when decrementing
-			if cnt < 0 {
-				return errors.Errorf("unable to UpdateCount with Name %s, Action %s, Amount %d. Decremented Count %d is less than 0", name, action, amount, cnt)
-			}
+		}
+		// Truncate to Capacity if Count > Capacity
+		if cnt > counter.Capacity {
+			cnt = counter.Capacity
+		}
+		// Truncate to Zero if Count is negative
+		if cnt < 0 {
+			cnt = 0
 		}
 		counter.Count = cnt
 		gs.Status.Counters[name] = counter
@@ -949,6 +912,10 @@ func (gs *GameServer) UpdateCounterCapacity(name string, capacity int64) error {
 	}
 	if counter, ok := gs.Status.Counters[name]; ok {
 		counter.Capacity = capacity
+		// If Capacity is now less than Count, reset Count here to equal Capacity
+		if counter.Count > counter.Capacity {
+			counter.Count = counter.Capacity
+		}
 		gs.Status.Counters[name] = counter
 		return nil
 	}
@@ -957,11 +924,12 @@ func (gs *GameServer) UpdateCounterCapacity(name string, capacity int64) error {
 
 // UpdateListCapacity updates the ListStatus Capacity to the given capacity.
 func (gs *GameServer) UpdateListCapacity(name string, capacity int64) error {
-	if capacity < 0 || capacity > 1000 {
+	if capacity < 0 || capacity > apiserver.ListMaxCapacity {
 		return errors.Errorf("unable to UpdateListCapacity: Name %s, Capacity %d. Capacity must be between 0 and 1000, inclusive", name, capacity)
 	}
 	if list, ok := gs.Status.Lists[name]; ok {
 		list.Capacity = capacity
+		list.Values = truncateList(list.Capacity, list.Values)
 		gs.Status.Lists[name] = list
 		return nil
 	}
@@ -970,30 +938,33 @@ func (gs *GameServer) UpdateListCapacity(name string, capacity int64) error {
 
 // AppendListValues adds unique values to the ListStatus Values list.
 func (gs *GameServer) AppendListValues(name string, values []string) error {
-	if len(values) == 0 {
-		return errors.Errorf("unable to AppendListValues: Name %s, Values %s. No values to append", name, values)
+	if values == nil {
+		return errors.Errorf("unable to AppendListValues: Name %s, Values %s. Values must not be nil", name, values)
 	}
 	if list, ok := gs.Status.Lists[name]; ok {
-		mergedList := mergeRemoveDuplicates(list.Values, values)
-		if len(mergedList) > int(list.Capacity) {
-			return errors.Errorf("unable to AppendListValues: Name %s, Values %s. Appended list length %d exceeds list capacity %d", name, values, len(mergedList), list.Capacity)
-		}
-		// If all given values are duplicates we give an error warning.
-		if len(mergedList) == len(list.Values) {
-			return errors.Errorf("unable to AppendListValues: Name %s, Values %s. All appended values are duplicates of the existing list", name, values)
-		}
-		// If only some values are duplicates, those duplicate values are silently dropped.
+		mergedList := MergeRemoveDuplicates(list.Values, values)
+		// Any duplicate values are silently dropped.
 		list.Values = mergedList
+		list.Values = truncateList(list.Capacity, list.Values)
 		gs.Status.Lists[name] = list
 		return nil
 	}
 	return errors.Errorf("unable to AppendListValues: Name %s, Values %s. List not found in GameServer %s", name, values, gs.ObjectMeta.GetName())
 }
 
-// mergeRemoveDuplicates merges two lists and removes any duplicate values.
+// truncateList truncates the list to the given capacity
+func truncateList(capacity int64, list []string) []string {
+	if list == nil || len(list) <= int(capacity) {
+		return list
+	}
+	list = append([]string{}, list[:capacity]...)
+	return list
+}
+
+// MergeRemoveDuplicates merges two lists and removes any duplicate values.
 // Maintains ordering, so new values from list2 are appended to the end of list1.
 // Returns a new list with unique values only.
-func mergeRemoveDuplicates(list1 []string, list2 []string) []string {
+func MergeRemoveDuplicates(list1 []string, list2 []string) []string {
 	uniqueList := []string{}
 	listMap := make(map[string]bool)
 	for _, v1 := range list1 {

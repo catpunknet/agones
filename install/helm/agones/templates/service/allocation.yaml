@@ -38,6 +38,9 @@ spec:
     - port: {{ .Values.agones.allocator.service.http.port }}
       name: {{ .Values.agones.allocator.service.http.portName }}
       targetPort: {{ .Values.agones.allocator.service.http.targetPort }}
+      {{- if .Values.agones.allocator.service.http.appProtocol }}
+      appProtocol: {{.Values.agones.allocator.service.http.appProtocol}}
+      {{- end}}
       {{- if eq .Values.agones.allocator.service.serviceType "NodePort" }}
       nodePort: {{ .Values.agones.allocator.service.http.nodePort }}
       {{- end }}
@@ -47,6 +50,9 @@ spec:
     - port: {{ .Values.agones.allocator.service.grpc.port }}
       name: {{ .Values.agones.allocator.service.grpc.portName }}
       targetPort: {{ .Values.agones.allocator.service.grpc.targetPort }}
+      {{- if .Values.agones.allocator.service.grpc.appProtocol }}
+      appProtocol: {{.Values.agones.allocator.service.grpc.appProtocol}}
+      {{- end}}
       {{- if eq .Values.agones.allocator.service.serviceType "NodePort" }}
       nodePort: {{ .Values.agones.allocator.service.grpc.nodePort }}
       {{- end }}
@@ -57,12 +63,18 @@ spec:
     - port: {{ .Values.agones.allocator.service.grpc.port }}
       name: {{ .Values.agones.allocator.service.grpc.portName }}
       targetPort: {{ .Values.agones.allocator.service.grpc.targetPort }}
+      {{- if .Values.agones.allocator.service.grpc.appProtocol }}
+      appProtocol: {{.Values.agones.allocator.service.grpc.appProtocol}}
+      {{- end}}      
       {{- if eq .Values.agones.allocator.service.serviceType "NodePort" }}
       nodePort: {{ .Values.agones.allocator.service.grpc.nodePort }}
       {{- end }}
       protocol: TCP
 {{- end }}
   type: {{ .Values.agones.allocator.service.serviceType }}
+{{- if (ne .Values.agones.allocator.service.clusterIP "") }}
+  clusterIP: {{ .Values.agones.allocator.service.clusterIP }}
+{{- end }}
 {{- if $useLoadBalancerIP }}
   loadBalancerIP: {{ .Values.agones.allocator.service.loadBalancerIP }}
 {{- end }}
@@ -167,15 +179,15 @@ spec:
     spec:
       affinity:
       {{- if .Values.agones.allocator.affinity }}
-      {{- if .Values.agones.system.requireDedicatedNode }}
-      {{- fail "agones.allocator.affinity and agones.system.requireDedicatedNode cannot be set at the same time!" }}
+      {{- if .Values.agones.requireDedicatedNodes }}
+      {{- fail "agones.allocator.affinity and agones.requireDedicatedNodes cannot be set at the same time!" }}
       {{- end}}
       {{- end}}
       {{- if .Values.agones.allocator.affinity }}
 {{ toYaml .Values.agones.allocator.affinity | indent 8 }}
       {{- else}}
         nodeAffinity:
-          {{- if .Values.agones.system.requireDedicatedNode }}
+          {{- if .Values.agones.requireDedicatedNodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:

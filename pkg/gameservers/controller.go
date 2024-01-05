@@ -46,6 +46,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	runtimeschema "k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -162,7 +163,7 @@ func NewController(
 	health.AddLivenessCheck("gameserver-creation-workerqueue", healthcheck.Check(c.creationWorkerQueue.Healthy))
 	health.AddLivenessCheck("gameserver-deletion-workerqueue", healthcheck.Check(c.deletionWorkerQueue.Healthy))
 
-	gsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = gsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: c.enqueueGameServerBasedOnState,
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			// no point in processing unless there is a State change
@@ -175,7 +176,7 @@ func NewController(
 	})
 
 	// track pod deletions, for when GameServers are deleted
-	pods.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = pods.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			oldPod := oldObj.(*corev1.Pod)
 			if isGameServerPod(oldPod) {
@@ -302,26 +303,16 @@ func (ext *Extensions) creationValidationHandler(review admissionv1.AdmissionRev
 
 	loggerForGameServer(gs, ext.baseLogger).WithField("review", review).Debug("creationValidationHandler")
 
-	causes, ok := gs.Validate(ext.apiHooks)
-	if !ok {
+	if errs := gs.Validate(ext.apiHooks); len(errs) > 0 {
+		kind := runtimeschema.GroupKind{
+			Group: review.Request.Kind.Group,
+			Kind:  review.Request.Kind.Kind,
+		}
+		statusErr := k8serrors.NewInvalid(kind, review.Request.Name, errs)
 		review.Response.Allowed = false
-		details := metav1.StatusDetails{
-			Name:   review.Request.Name,
-			Group:  review.Request.Kind.Group,
-			Kind:   review.Request.Kind.Kind,
-			Causes: causes,
-		}
-		review.Response.Result = &metav1.Status{
-			Status:  metav1.StatusFailure,
-			Message: "GameServer configuration is invalid",
-			Reason:  metav1.StatusReasonInvalid,
-			Details: &details,
-		}
-
+		review.Response.Result = &statusErr.ErrStatus
 		loggerForGameServer(gs, ext.baseLogger).WithField("review", review).Debug("Invalid GameServer")
-		return review, nil
 	}
-
 	return review, nil
 }
 
@@ -345,21 +336,21 @@ func (c *Controller) Run(ctx context.Context, workers int) error {
 
 	// Run the Health Controller
 	go func() {
-		if err := c.healthController.Run(ctx); err != nil {
+		if err := c.healthController.Run(ctx, workers); err != nil {
 			c.baseLogger.WithError(err).Error("error running health controller")
 		}
 	}()
 
 	// Run the Migration Controller
 	go func() {
-		if err := c.migrationController.Run(ctx); err != nil {
+		if err := c.migrationController.Run(ctx, workers); err != nil {
 			c.baseLogger.WithError(err).Error("error running migration controller")
 		}
 	}()
 
 	// Run the Missing Pod Controller
 	go func() {
-		if err := c.missingPodController.Run(ctx); err != nil {
+		if err := c.missingPodController.Run(ctx, workers); err != nil {
 			c.baseLogger.WithError(err).Error("error running missing pod controller")
 		}
 	}()
@@ -469,7 +460,7 @@ func (c *Controller) syncGameServerDeletionTimestamp(ctx context.Context, gs *ag
 		}
 	}
 	gsCopy.ObjectMeta.Finalizers = fin
-	loggerForGameServer(gsCopy, c.baseLogger).Infof("No pods found, removing finalizer %s", agones.GroupName)
+	loggerForGameServer(gsCopy, c.baseLogger).Debugf("No pods found, removing finalizer %s", agones.GroupName)
 	gs, err = c.gameServerGetter.GameServers(gsCopy.ObjectMeta.Namespace).Update(ctx, gsCopy, metav1.UpdateOptions{})
 	return gs, errors.Wrapf(err, "error removing finalizer for GameServer %s", gsCopy.ObjectMeta.Name)
 }
@@ -512,6 +503,24 @@ func (c *Controller) syncGameServerCreatingState(ctx context.Context, gs *agones
 	// Maybe something went wrong, and the pod was created, but the state was never moved to Starting, so let's check
 	_, err := c.gameServerPod(gs)
 	if k8serrors.IsNotFound(err) {
+
+		for i := range gs.Spec.Ports {
+			if gs.Spec.Ports[i].PortPolicy == agonesv1.Static && gs.Spec.Ports[i].Protocol == agonesv1.ProtocolTCPUDP {
+				name := gs.Spec.Ports[i].Name
+				gs.Spec.Ports[i].Name = name + "-tcp"
+				gs.Spec.Ports[i].Protocol = corev1.ProtocolTCP
+
+				// Add separate UDP port configuration
+				gs.Spec.Ports = append(gs.Spec.Ports, agonesv1.GameServerPort{
+					PortPolicy:    agonesv1.Static,
+					Name:          name + "-udp",
+					ContainerPort: gs.Spec.Ports[i].ContainerPort,
+					HostPort:      gs.Spec.Ports[i].HostPort,
+					Protocol:      corev1.ProtocolUDP,
+					Container:     gs.Spec.Ports[i].Container,
+				})
+			}
+		}
 		gs, err = c.createGameServerPod(ctx, gs)
 		if err != nil || gs.Status.State == agonesv1.GameServerStateError {
 			return gs, err
@@ -543,23 +552,30 @@ func (c *Controller) syncDevelopmentGameServer(ctx context.Context, gs *agonesv1
 		return gs, nil
 	}
 
-	// Only move from Creating -> Ready. Other manual state changes are up to the end user.
-	// We also don't want to move from Allocated -> Ready every time someone allocates a GameServer.
-	if gs.Status.State != agonesv1.GameServerStateCreating {
+	// Only move from Creating -> Ready or RequestReady -> Ready.
+	// Shutdown -> Delete will still be handled normally by syncGameServerShutdownState.
+	// Other manual state changes are up to the end user.
+	if gs.Status.State != agonesv1.GameServerStateCreating && gs.Status.State != agonesv1.GameServerStateRequestReady {
 		return gs, nil
 	}
 
 	loggerForGameServer(gs, c.baseLogger).Debug("GS is a development game server and will not be managed by Agones.")
 	gsCopy := gs.DeepCopy()
-	var ports []agonesv1.GameServerStatusPort
-	for _, p := range gs.Spec.Ports {
-		ports = append(ports, p.Status())
-	}
 
 	gsCopy.Status.State = agonesv1.GameServerStateReady
-	gsCopy.Status.Ports = ports
-	gsCopy.Status.Address = devIPAddress
-	gsCopy.Status.NodeName = devIPAddress
+
+	if gs.Status.State == agonesv1.GameServerStateCreating {
+		var ports []agonesv1.GameServerStatusPort
+		for _, p := range gs.Spec.Ports {
+			ports = append(ports, p.Status())
+		}
+
+		gsCopy.Status.Ports = ports
+		gsCopy.Status.Address = devIPAddress
+		gsCopy.Status.Addresses = []corev1.NodeAddress{{Address: devIPAddress, Type: "InternalIP"}}
+		gsCopy.Status.NodeName = devIPAddress
+	}
+
 	gs, err := c.gameServerGetter.GameServers(gs.ObjectMeta.Namespace).Update(ctx, gsCopy, metav1.UpdateOptions{})
 	if err != nil {
 		return gs, errors.Wrapf(err, "error updating GameServer %s to %v status", gs.Name, gs.Status)
@@ -611,7 +627,6 @@ func (c *Controller) createGameServerPod(ctx context.Context, gs *agonesv1.GameS
 			gs, err = c.moveToErrorState(ctx, gs, err.Error())
 			return gs, err
 		default:
-			loggerForGameServer(gs, c.baseLogger).WithField("pod", pod).WithError(err)
 			c.recorder.Eventf(gs, corev1.EventTypeWarning, string(gs.Status.State), "error creating Pod for GameServer %s", gs.Name)
 			return gs, errors.Wrapf(err, "error creating Pod for GameServer %s", gs.Name)
 		}
@@ -789,6 +804,12 @@ func (c *Controller) syncGameServerStartingState(ctx context.Context, gs *agones
 	// so if there is an error of any kind, then move this to queue backoff
 	pod, err := c.gameServerPod(gs)
 	if err != nil {
+		// expected to happen, so don't log it.
+		if k8serrors.IsNotFound(err) {
+			return nil, workerqueue.NewDebugError(err)
+		}
+
+		// do log if it's something other than NotFound, since that's weird.
 		return nil, err
 	}
 	if pod.Spec.NodeName == "" {
@@ -923,6 +944,10 @@ func (c *Controller) syncGameServerShutdownState(ctx context.Context, gs *agones
 // moveToErrorState moves the GameServer to the error state
 func (c *Controller) moveToErrorState(ctx context.Context, gs *agonesv1.GameServer, msg string) (*agonesv1.GameServer, error) {
 	gsCopy := gs.DeepCopy()
+	if gsCopy.Annotations == nil {
+		gsCopy.Annotations = make(map[string]string, 1)
+	}
+	gsCopy.Annotations[agonesv1.GameServerErroredAtAnnotation] = time.Now().Format(time.RFC3339)
 	gsCopy.Status.State = agonesv1.GameServerStateError
 
 	gs, err := c.gameServerGetter.GameServers(gs.ObjectMeta.Namespace).Update(ctx, gsCopy, metav1.UpdateOptions{})

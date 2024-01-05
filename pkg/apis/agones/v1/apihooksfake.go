@@ -17,40 +17,40 @@ package v1
 import (
 	"agones.dev/agones/pkg/apis"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // fakeAPIHooks is a stubabble, fake implementation of APIHooks
 // This needs to be private, so it doesn't get picked up by the DeepCopy() generation toolkit.
 type fakeAPIHooks struct {
-	StubValidateGameServerSpec  func(*GameServerSpec) []metav1.StatusCause
-	StubValidateScheduling      func(apis.SchedulingStrategy) []metav1.StatusCause
-	StubMutateGameServerPodSpec func(*GameServerSpec, *corev1.PodSpec) error
-	StubSetEviction             func(*Eviction, *corev1.Pod) error
+	StubValidateGameServerSpec func(*GameServerSpec, *field.Path) field.ErrorList
+	StubValidateScheduling     func(apis.SchedulingStrategy, *field.Path) field.ErrorList
+	StubMutateGameServerPod    func(*GameServerSpec, *corev1.Pod) error
+	StubSetEviction            func(*Eviction, *corev1.Pod) error
 }
 
 var _ APIHooks = fakeAPIHooks{}
 
 // ValidateGameServerSpec is called by GameServer.Validate to allow for product specific validation.
-func (f fakeAPIHooks) ValidateGameServerSpec(gss *GameServerSpec) []metav1.StatusCause {
+func (f fakeAPIHooks) ValidateGameServerSpec(gss *GameServerSpec, fldPath *field.Path) field.ErrorList {
 	if f.StubValidateGameServerSpec != nil {
-		return f.StubValidateGameServerSpec(gss)
+		return f.StubValidateGameServerSpec(gss, fldPath)
 	}
 	return nil
 }
 
 // ValidateScheduling is called by Fleet and GameServerSet Validate() to allow for product specific validation of scheduling strategy.
-func (f fakeAPIHooks) ValidateScheduling(strategy apis.SchedulingStrategy) []metav1.StatusCause {
+func (f fakeAPIHooks) ValidateScheduling(strategy apis.SchedulingStrategy, fldPath *field.Path) field.ErrorList {
 	if f.StubValidateScheduling != nil {
-		return f.StubValidateScheduling(strategy)
+		return f.StubValidateScheduling(strategy, fldPath)
 	}
 	return nil
 }
 
-// MutateGameServerPodSpec is called by createGameServerPod to allow for product specific pod mutation.
-func (f fakeAPIHooks) MutateGameServerPodSpec(gss *GameServerSpec, podSpec *corev1.PodSpec) error {
-	if f.StubMutateGameServerPodSpec != nil {
-		return f.StubMutateGameServerPodSpec(gss, podSpec)
+// MutateGameServerPod is called by createGameServerPod to allow for product specific pod mutation.
+func (f fakeAPIHooks) MutateGameServerPod(gss *GameServerSpec, pod *corev1.Pod) error {
+	if f.StubMutateGameServerPod != nil {
+		return f.StubMutateGameServerPod(gss, pod)
 	}
 	return nil
 }

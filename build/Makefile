@@ -24,7 +24,7 @@
 #
 
 # base version target. This is usually the next release.
-base_version = 1.33.0
+base_version = 1.38.0
 
 #
 # All of the following can be overwritten with environment variables
@@ -61,10 +61,10 @@ KIND_PROFILE ?= agones
 KIND_CONTAINER_NAME=$(KIND_PROFILE)-control-plane
 
 # Game Server image to use while doing end-to-end tests
-GS_TEST_IMAGE ?= us-docker.pkg.dev/agones-images/examples/simple-game-server:0.16
+GS_TEST_IMAGE ?= us-docker.pkg.dev/agones-images/examples/simple-game-server:0.23
 
 # Enable all alpha feature gates. Keep in sync with `false` (alpha) entries in pkg/util/runtime/features.go:featureDefaults
-ALPHA_FEATURE_GATES ?= "PlayerAllocationFilter=true&PlayerTracking=true&CountsAndLists=true&FleetAllocationOverflow=true&Example=true"
+ALPHA_FEATURE_GATES ?= "PlayerAllocationFilter=true&PlayerTracking=true&CountsAndLists=true&DisableResyncOnSDKServer=true&Example=true"
 
 # Build with Windows support
 WITH_WINDOWS=1
@@ -424,7 +424,7 @@ install: HELM_ARGS ?=
 install: $(ensure-build-image) install-custom-pull-secret
 	-$(DOCKER_RUN) bash -c '[[ $$(helm status agones -n agones-system --output json | jq -r ".info.status") =~ (failed|pending-.*) ]] && helm uninstall agones --namespace=agones-system || true'
 	$(DOCKER_RUN) \
-		helm upgrade --install --atomic --wait --namespace=agones-system \
+		helm upgrade --install --atomic --wait --timeout 10m --namespace=agones-system \
 		--create-namespace \
 		--set agones.image.tag=$(VERSION),agones.image.registry=$(REGISTRY) \
 		--set agones.image.controller.pullPolicy=$(IMAGE_PULL_POLICY),agones.image.controller.pullSecret=$(IMAGE_PULL_SECRET) \
@@ -484,12 +484,14 @@ build-extensions-binary-linux-arm64: $(ensure-build-image)
 	-tags $(GO_BUILD_TAGS) -o $(go_build_base_path)/cmd/extensions/bin/extensions.linux.arm64 \
 	$(go_rebuild_flags) $(go_version_flags) -installsuffix cgo $(agones_package)/cmd/extensions
 
-# Lint the go source code.
+# Lint the go source code and yaml files.
 # use LINT_TIMEOUT to manipulate the linter timeout
 lint: LINT_TIMEOUT ?= 15m
 lint: $(ensure-build-image)
 	docker run -t -e "TERM=xterm-256color" -e "$(gomod_on)" --rm $(common_mounts) -w $(workdir_path) $(DOCKER_RUN_ARGS) $(build_tag) bash -c \
-		"golangci-lint run ./examples/... && golangci-lint run --timeout $(LINT_TIMEOUT) ./..."
+		"golangci-lint run ./examples/... && \
+		golangci-lint run --timeout $(LINT_TIMEOUT) ./... && \
+		yamllint ."
 
 # Extract licenses from source tree
 build-licenses:
@@ -711,10 +713,8 @@ endif
 	DOCKER_CLI_EXPERIMENTAL=enabled docker manifest create $(sidecar_tag) $(push_sidecar_manifest)
 	DOCKER_CLI_EXPERIMENTAL=enabled docker manifest push $(sidecar_tag)
 
-push-agones-sdk-windows:
-	# Using docker buildx with foreign OSes is a bit awkward. Since the layers but not the tag
-	# was cached we have to rebuild the image (which should be fast since it's cached).
-	$(MAKE) WINDOWS_DOCKER_PUSH_ARGS=--push build-agones-sdk-image-windows
+push-agones-sdk-windows: WINDOWS_DOCKER_PUSH_ARGS=--push
+push-agones-sdk-windows: build-agones-sdk-image-windows
 
 push-agones-sdk-linux-image-arm64: $(ensure-build-image)
 	$(MAKE) DOCKER_BUILD_ARGS=--push build-agones-sdk-image-arm64
@@ -723,8 +723,9 @@ push-agones-sdk-linux-image-amd64: build-agones-sdk-image-amd64
 	docker push $(sidecar_linux_amd64_tag)
 
 # Generate the Embedded CRD openapi
-gen-embedded-openapi:
-	docker run --rm $(common_mounts) -w $(workdir_path)/build $(build_tag) ./export-openapi.sh
+gen-embedded-openapi: ensure-build-image
+	docker run --rm $(common_mounts) --workdir=$(mount_path)/build/scripts/k8s-export-openapi $(DOCKER_RUN_ARGS) $(build_tag) \
+		go run -mod=mod ./main.go
 
 # Generate the static install script
 gen-install: $(ensure-build-image)
@@ -855,4 +856,10 @@ test-gen-crd-client:
 		echo "Differences found."; \
 		echo "$$diff_output"; \
 	fi
+
+install-release: $(ensure-build-image)
+	docker run -it --rm \
+		$(common_mounts) \
+		$(DOCKER_RUN_ARGS) \
+		$(build_tag) /go/src/agones.dev/agones/build/install-release.sh
 

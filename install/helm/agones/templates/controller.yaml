@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- $featureGates := include "agones.featureGates" . | fromYaml }}
 {{- $replicas := (int .Values.agones.controller.replicas) }}
-{{- if not $featureGates.SplitControllerAndExtensions }}
-{{- $replicas = 1 }}
-{{- end }}
 {{- if lt $replicas 1 }}
 {{- fail "agones.controller.replica field has an invalid value!" }}
 {{- end }}
@@ -66,15 +62,15 @@ spec:
     spec:
       affinity:
       {{- if .Values.agones.controller.affinity }}
-      {{- if .Values.agones.system.requireDedicatedNode }}
-      {{- fail "agones.controller.affinity and agones.system.requireDedicatedNode cannot be set at the same time!" }}
+      {{- if .Values.agones.requireDedicatedNodes }}
+      {{- fail "agones.controller.affinity and agones.requireDedicatedNodes cannot be set at the same time!" }}
       {{- end}}
       {{- end}}
       {{- if .Values.agones.controller.affinity }}
 {{ toYaml .Values.agones.controller.affinity | indent 8 }}
       {{- else}}
         nodeAffinity:
-          {{- if .Values.agones.system.requireDedicatedNode }}
+          {{- if .Values.agones.requireDedicatedNodes }}
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
@@ -148,7 +144,7 @@ spec:
           value: {{ .Values.agones.cloudProduct | quote }}
 {{- if .Values.agones.controller.persistentLogs }}
         - name: LOG_DIR
-          value: "/home/agones/logs"
+          value: "/logs"
         - name: LOG_SIZE_LIMIT_MB
           value: {{ .Values.agones.controller.persistentLogsSizeLimitMB | quote }}
 {{- end }}
@@ -190,11 +186,11 @@ spec:
 {{- end }}
         volumeMounts:
         - name: certs
-          mountPath: /home/agones/certs
+          mountPath: /certs
           readOnly: true
 {{- if .Values.agones.controller.persistentLogs }}
         - name: logs
-          mountPath: /home/agones/logs
+          mountPath: /logs
           readOnly: false
 {{- end }}
       volumes:
